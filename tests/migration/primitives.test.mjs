@@ -581,6 +581,31 @@ describe('redaction', () => {
     ).toBe('DATABASE_URL=[REDACTED]');
   });
 
+  it('classifies secret env names without treating ordinary PASS suffixes or short values as secrets', () => {
+    const entries = {
+      RMIG_TEST_DB_PASS: 'db-pass-secret-9417',
+      RMIG_TEST_API_KEY: 'api-key-secret-9417',
+      RMIG_TEST_CREDENTIAL: 'credential-secret-9417',
+      RMIG_TEST_COMPASS: 'ordinary-compass-value',
+      RMIG_TEST_SHORT_TOKEN: 'short',
+    };
+    const previous = new Map(Object.keys(entries).map((name) => [name, process.env[name]]));
+    Object.assign(process.env, entries);
+    try {
+      const output = redactText(Object.values(entries).join('|'));
+      expect(output).not.toContain(entries.RMIG_TEST_DB_PASS);
+      expect(output).not.toContain(entries.RMIG_TEST_API_KEY);
+      expect(output).not.toContain(entries.RMIG_TEST_CREDENTIAL);
+      expect(output).toContain(entries.RMIG_TEST_COMPASS);
+      expect(output).toContain(entries.RMIG_TEST_SHORT_TOKEN);
+    } finally {
+      for (const [name, value] of previous) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   it('redacts multiline PostgreSQL errors and connection strings', () => {
     const error = [
       `error: password authentication failed for user "${secrets.user}"`,

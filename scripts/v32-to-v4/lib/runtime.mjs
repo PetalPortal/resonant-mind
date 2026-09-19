@@ -1,3 +1,5 @@
+import { MigrationRefusal } from './refusal.mjs';
+
 const MINIMUM_NODE_MAJOR = 22;
 
 function currentNodeMajor() {
@@ -11,10 +13,17 @@ export function assertNodeVersion(nodeMajor = currentNodeMajor()) {
     !Number.isInteger(nodeMajor) ||
     nodeMajor < MINIMUM_NODE_MAJOR
   ) {
-    const error = new Error(
-      `Node.js ${MINIMUM_NODE_MAJOR} or newer is required; received major ${String(nodeMajor)}.`,
-    );
-    error.code = 'RMIG-E-NODE-VERSION';
-    throw error;
+    throw new MigrationRefusal({
+      code: 'RMIG-E-NODE-VERSION',
+      phase: 'runtime',
+      summary: `Node.js ${MINIMUM_NODE_MAJOR} or newer is required; received major ${String(nodeMajor)}.`,
+      safe_details: {
+        minimum_major: MINIMUM_NODE_MAJOR,
+        received_major: typeof nodeMajor === 'number' && Number.isFinite(nodeMajor)
+          ? nodeMajor
+          : String(nodeMajor),
+      },
+      report_path: null,
+    });
   }
 }

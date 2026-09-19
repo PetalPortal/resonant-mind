@@ -28,7 +28,7 @@ export function canonicalSha256(value) {
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const SAFE_CHECKSUM_PATH = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
 
-function assertSafeChecksumName(name) {
+export function assertSafeBundleMemberPath(name, label = 'Bundle member path') {
   if (
     typeof name !== 'string' ||
     name.length === 0 ||
@@ -39,7 +39,7 @@ function assertSafeChecksumName(name) {
     name.includes('\\') ||
     !SAFE_CHECKSUM_PATH.test(name)
   ) {
-    throw new TypeError('Checksum name must be a safe relative POSIX path.');
+    throw new TypeError(`${label} must be a safe relative POSIX path.`);
   }
 
   let segmentStart = 0;
@@ -55,7 +55,7 @@ function assertSafeChecksumName(name) {
       /[.]$/u.test(segment) ||
       /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/iu.test(basename)
     ) {
-      throw new TypeError('Checksum name must be a safe relative POSIX path.');
+      throw new TypeError(`${label} must be a safe relative POSIX path.`);
     }
     segmentStart = segmentEnd + 1;
   }
@@ -140,7 +140,7 @@ export function formatChecksumLines(entries) {
       throw new TypeError(`Checksum entry at index ${index} must be a data property.`);
     }
     const { name, sha256 } = snapshotChecksumEntry(arrayDescriptor.value, index);
-    assertSafeChecksumName(name);
+    assertSafeBundleMemberPath(name, 'Checksum name');
     if (seen.has(name)) {
       throw new TypeError(`Duplicate checksum name: ${name}.`);
     }

@@ -3,6 +3,13 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assertNodeVersion } from './lib/runtime.mjs';
+import { canonicalJson } from './lib/canonical-json.mjs';
+import {
+  exitCodeFor,
+  isMigrationRefusal,
+  MigrationRefusal,
+  serializeRefusal,
+} from './lib/refusal.mjs';
 
 const commands = [
   'inspect-source',
@@ -33,37 +40,52 @@ export function main({
   writeStderr = (value) => process.stderr.write(value),
   runCommand,
 } = {}) {
+  let json = false;
   try {
+    json = argv.includes('--json');
+    const positionalArgv = argv.filter((argument) => argument !== '--json');
     assertNodeVersion(nodeMajor);
-  } catch (error) {
-    if (error?.code !== 'RMIG-E-NODE-VERSION') {
-      throw error;
+    const [command, ...commandArgs] = positionalArgv;
+    if (command === undefined || command === '--help') {
+      writeStdout(help);
+      return 0;
     }
-    writeStderr(`${error.code}: ${error.message}\n`);
-    return 2;
-  }
 
-  const [command, ...commandArgs] = argv;
-  if (command === undefined || command === '--help') {
-    writeStdout(help);
-    return 0;
-  }
+    if (!commands.includes(command)) {
+      throw new MigrationRefusal({
+        code: 'RMIG-E-COMMAND-UNKNOWN',
+        phase: 'runtime',
+        summary: 'Unknown migration command. Run with --help to list commands.',
+        safe_details: {},
+        report_path: null,
+      });
+    }
 
-  if (!commands.includes(command)) {
-    writeStderr(
-      'RMIG-E-COMMAND-UNKNOWN: Unknown migration command. Run with --help to list commands.\n',
-    );
-    return 2;
-  }
+    if (runCommand === undefined) {
+      throw new MigrationRefusal({
+        code: 'RMIG-E-COMMAND-NOT-IMPLEMENTED',
+        phase: command,
+        summary: `Migration command "${command}" is not implemented yet.`,
+        safe_details: {},
+        report_path: null,
+      });
+    }
 
-  if (runCommand === undefined) {
-    writeStderr(
-      `RMIG-E-COMMAND-NOT-IMPLEMENTED: Migration command "${command}" is not implemented yet.\n`,
-    );
-    return 2;
+    return runCommand(command, commandArgs);
+  } catch (error) {
+    if (isMigrationRefusal(error)) {
+      const serialized = serializeRefusal(error, { json });
+      (json ? writeStdout : writeStderr)(serialized);
+      return exitCodeFor(error);
+    }
+    const summary = 'Unexpected internal migration error.';
+    if (json) {
+      writeStdout(canonicalJson({ code: 'RMIG-E-INTERNAL', summary }));
+    } else {
+      writeStderr(`RMIG-E-INTERNAL: ${summary}\n`);
+    }
+    return exitCodeFor(error);
   }
-
-  return runCommand(command, commandArgs);
 }
 
 const isDirectInvocation =

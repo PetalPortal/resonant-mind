@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { main } from '../../scripts/v32-to-v4/cli.mjs';
 import { assertNodeVersion } from '../../scripts/v32-to-v4/lib/runtime.mjs';
+import { MigrationRefusal } from '../../scripts/v32-to-v4/lib/refusal.mjs';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const cliPath = resolve(repositoryRoot, 'scripts/v32-to-v4/cli.mjs');
@@ -75,10 +76,23 @@ describe('v3.2 to v4 migration CLI', () => {
     expect(result.status).toBe(2);
     expect(result.stdout).toBe('');
     expect(result.stderr).toBe(
-      'RMIG-E-COMMAND-UNKNOWN: Unknown migration command. Run with --help to list commands.\n',
+      'RMIG-E-COMMAND-UNKNOWN: Unknown migration command. Run with --help to list commands. Run with --help and choose one listed migration command.\n',
     );
     expect(result.stderr).not.toContain('unsafe-detail');
     expect(result.stderr).not.toContain('Error:');
+  });
+
+  it.each([
+    ['before the command', ['--json', 'not-a-command']],
+    ['after the command', ['not-a-command', '--json']],
+  ])('routes an expected refusal as canonical JSON when --json is %s', (_label, args) => {
+    const result = spawnCli(args);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toBe('');
+    expect(result.stdout).toBe(
+      '{"code":"RMIG-E-COMMAND-UNKNOWN","phase":"runtime","remediation":"Run with --help and choose one listed migration command.","report_path":null,"safe_details":{},"summary":"Unknown migration command. Run with --help to list commands."}\n',
+    );
   });
 
   it('refuses an advertised command until its handler is implemented', () => {
@@ -87,7 +101,7 @@ describe('v3.2 to v4 migration CLI', () => {
     expect(result.status).toBe(2);
     expect(result.stdout).toBe('');
     expect(result.stderr).toBe(
-      'RMIG-E-COMMAND-NOT-IMPLEMENTED: Migration command "inspect-source" is not implemented yet.\n',
+      'RMIG-E-COMMAND-NOT-IMPLEMENTED: Migration command "inspect-source" is not implemented yet. Use an implemented migration command or install a release that provides this phase.\n',
     );
   });
 
@@ -110,9 +124,22 @@ describe('v3.2 to v4 migration CLI', () => {
     expect(result.status).toBe(2);
     expect(result.stdout).toBe('');
     expect(result.stderr).toBe(
-      'RMIG-E-NODE-VERSION: Node.js 22 or newer is required; received major 21.\n',
+      'RMIG-E-NODE-VERSION: Node.js 22 or newer is required; received major 21. Install and run the migrator with Node.js 22 or newer.\n',
     );
     expect(result.stderr).not.toContain('at ');
+  });
+
+  it('routes the Node gate as canonical JSON when requested globally', () => {
+    const result = captureMain({ argv: ['--json', 'inspect-source'], nodeMajor: 21 });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      code: 'RMIG-E-NODE-VERSION',
+      phase: 'runtime',
+      safe_details: { minimum_major: 22, received_major: 21 },
+    });
+    expect(result.stdout.endsWith('\n')).toBe(true);
   });
 
   it('checks the Node gate before invoking a command handler or accessing a source', () => {
@@ -142,5 +169,35 @@ describe('v3.2 to v4 migration CLI', () => {
 
     expect(result.status).toBe(0);
     expect(runCommand).toHaveBeenCalledWith('inspect-source', ['--source', 'fixture']);
+  });
+
+  it('serializes a handler MigrationRefusal through the shared refusal contract', () => {
+    const refusal = new MigrationRefusal({
+      code: 'RMIG-E-SOURCE-ARG',
+      phase: 'inspect-source',
+      summary: 'Source argument is invalid.',
+      safe_details: { argument: '--source' },
+      report_path: null,
+    });
+    const result = captureMain({
+      argv: ['inspect-source', '--json', '--source', 'fixture'],
+      runCommand: () => { throw refusal; },
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout)).toEqual(refusal.toJSON());
+  });
+
+  it.each([
+    [false, '', 'RMIG-E-INTERNAL: Unexpected internal migration error.\n'],
+    [true, '{"code":"RMIG-E-INTERNAL","summary":"Unexpected internal migration error."}\n', ''],
+  ])('hides unexpected errors and secrets with json=%s', (json, stdout, stderr) => {
+    const result = captureMain({
+      argv: ['inspect-source', ...(json ? ['--json'] : [])],
+      runCommand: () => { throw new Error('internal secret=do-not-leak'); },
+    });
+
+    expect(result).toEqual({ status: 1, stdout, stderr });
   });
 });

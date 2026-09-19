@@ -3,7 +3,9 @@ import { types } from 'node:util';
 const REDACTED = '[REDACTED]';
 const MAX_DEPTH = 100;
 const MAX_CLASSIFIED_KEY_LENGTH = 256;
+const MIN_ENVIRONMENT_SECRET_LENGTH = 8;
 const SENSITIVE_KEY_SUFFIX = /(?:password|passphrase|secret|token|apikey|authorization|auth|pwd)$/u;
+const SECRET_ENVIRONMENT_KEY_SUFFIX = /(?:password|passphrase|pwd|secret|token|apikey|authorization|auth|credential|credentials|databaseurl|dburl|postgresurl|postgresqlurl|connectionstring|dsn|privatekey|clientkey)$/u;
 const URL_CANDIDATE = /\b[a-z][a-z0-9+.-]*:(?:\/\/|\\\/\\\/)[^\s"'<>]+/giu;
 const QUERY_PARAMETER = /([?&])([^=&#\s"'<>]+)=([^&#\s"'<>]*)/gu;
 const POSTGRES_USER = /(password authentication failed for user\s+)["'][^"'\r\n]+["']/giu;
@@ -124,6 +126,46 @@ function environmentSecrets(environmentValues) {
   return secrets;
 }
 
+function isSecretEnvironmentKey(key) {
+  const normalized = key.slice(-MAX_CLASSIFIED_KEY_LENGTH).normalize('NFKC').toLowerCase();
+  const finalToken = normalized.split(/[^a-z0-9]+/u).at(-1);
+  return finalToken === 'pass' || SECRET_ENVIRONMENT_KEY_SUFFIX.test(secretSkeleton(key));
+}
+
+function defaultEnvironmentValues() {
+  const values = [];
+  let valueCount = 0;
+  for (const key of Object.getOwnPropertyNames(process.env)) {
+    if (!isSecretEnvironmentKey(key)) {
+      continue;
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(process.env, key);
+    const value = descriptor?.value;
+    if (
+      typeof value === 'string' &&
+      value.length >= MIN_ENVIRONMENT_SECRET_LENGTH &&
+      value.trim().length >= MIN_ENVIRONMENT_SECRET_LENGTH
+    ) {
+      defineArrayIndex(values, valueCount, value);
+      valueCount += 1;
+    }
+  }
+  return values;
+}
+
+function combinedEnvironmentSecrets(environmentValues) {
+  const defaults = defaultEnvironmentValues();
+  const explicit = environmentSecrets(environmentValues);
+  const combined = [];
+  for (let index = 0; index < defaults.length; index += 1) {
+    defineArrayIndex(combined, combined.length, defaults[index]);
+  }
+  for (let index = 0; index < explicit.length; index += 1) {
+    defineArrayIndex(combined, combined.length, explicit[index]);
+  }
+  return environmentSecrets(combined);
+}
+
 function safeOptions(options) {
   if (options === null || typeof options !== 'object') {
     throw new TypeError('Redaction options must be an object.');
@@ -135,7 +177,7 @@ function safeOptions(options) {
   if (descriptor && !Object.hasOwn(descriptor, 'value')) {
     throw new TypeError('Redaction options must not contain accessors.');
   }
-  return { environmentValues: descriptor?.value };
+  return { environmentSecrets: combinedEnvironmentSecrets(descriptor?.value) };
 }
 
 function redactUrlUserinfo(value) {
@@ -375,14 +417,12 @@ function redactAssignedCredentials(value) {
   return output + value.slice(cursor);
 }
 
-export function redactText(value, options = {}) {
+function redactTextWithSecrets(value, secrets) {
   if (typeof value !== 'string') {
     throw new TypeError('Text to redact must be a string.');
   }
 
-  const validatedOptions = safeOptions(options);
   let output = value;
-  const secrets = environmentSecrets(validatedOptions.environmentValues);
   for (let index = 0; index < secrets.length; index += 1) {
     const secret = secrets[index];
     output = output.split(secret).join(REDACTED);
@@ -394,12 +434,17 @@ export function redactText(value, options = {}) {
   return output.replace(POSTGRES_USER, `$1"${REDACTED}"`);
 }
 
+export function redactText(value, options = {}) {
+  const validatedOptions = safeOptions(options);
+  return redactTextWithSecrets(value, validatedOptions.environmentSecrets);
+}
+
 function redactValue(value, options, ancestors, path, depth) {
   if (depth > MAX_DEPTH) {
     throw new TypeError(`Maximum redaction depth of ${MAX_DEPTH} exceeded at ${path}.`);
   }
   if (typeof value === 'string') {
-    return redactText(value, options);
+    return redactTextWithSecrets(value, options.environmentSecrets);
   }
   if (value === null || typeof value === 'boolean' || typeof value === 'number') {
     return value;
@@ -486,6 +531,5 @@ function redactValue(value, options, ancestors, path, depth) {
 
 export function redact(value, options = {}) {
   const validatedOptions = safeOptions(options);
-  environmentSecrets(validatedOptions.environmentValues);
   return redactValue(value, validatedOptions, new WeakSet(), '$', 0);
 }
