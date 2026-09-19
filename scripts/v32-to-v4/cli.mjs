@@ -3,6 +3,7 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assertNodeVersion } from './lib/runtime.mjs';
+import { humanInspectReport, inspectSource, parseInspectSourceArgs } from './commands/inspect-source.mjs';
 import { canonicalJson } from './lib/canonical-json.mjs';
 import {
   exitCodeFor,
@@ -61,7 +62,8 @@ export function main({
       });
     }
 
-    if (runCommand === undefined) {
+    if (runCommand !== undefined) return runCommand(command, commandArgs);
+    if (command !== 'inspect-source') {
       throw new MigrationRefusal({
         code: 'RMIG-E-COMMAND-NOT-IMPLEMENTED',
         phase: command,
@@ -70,8 +72,12 @@ export function main({
         report_path: null,
       });
     }
-
-    return runCommand(command, commandArgs);
+    const parsed = parseInspectSourceArgs(commandArgs);
+    return inspectSource(parsed).then((report) => {
+      if (json) writeStdout(`${canonicalJson(report)}\n`);
+      else writeStdout(humanInspectReport(report, parsed.reportPath));
+      return 0;
+    });
   } catch (error) {
     if (isMigrationRefusal(error)) {
       const serialized = serializeRefusal(error, { json });
@@ -93,5 +99,15 @@ const isDirectInvocation =
   import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
 
 if (isDirectInvocation) {
-  process.exitCode = main();
+  const result = main();
+  process.exitCode = result instanceof Promise
+    ? await result.catch((error) => {
+      if (isMigrationRefusal(error)) {
+        process.stderr.write(serializeRefusal(error));
+        return exitCodeFor(error);
+      }
+      process.stderr.write('RMIG-E-INTERNAL: Unexpected internal migration error.\n');
+      return 1;
+    })
+    : result;
 }

@@ -95,14 +95,13 @@ describe('v3.2 to v4 migration CLI', () => {
     );
   });
 
-  it('refuses an advertised command until its handler is implemented', () => {
+  it('refuses inspect-source arguments before opening a source', () => {
     const result = spawnCli(['inspect-source', '--source', 'do-not-open']);
 
     expect(result.status).toBe(2);
     expect(result.stdout).toBe('');
-    expect(result.stderr).toBe(
-      'RMIG-E-COMMAND-NOT-IMPLEMENTED: Migration command "inspect-source" is not implemented yet. Use an implemented migration command or install a release that provides this phase.\n',
-    );
+    expect(result.stderr).toContain('RMIG-E-SOURCE-ARG:');
+    expect(result.stderr).not.toContain('do-not-open');
   });
 
   it.each([21, 0, -1, Number.NaN, Number.POSITIVE_INFINITY, 22.5, '22', null])(
