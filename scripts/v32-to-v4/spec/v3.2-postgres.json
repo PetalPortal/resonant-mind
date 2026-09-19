@@ -1,0 +1,1752 @@
+{
+  "family": "postgres-v3.2.0",
+  "catalog_version": "v3.2.0",
+  "tables": [
+    {
+      "name": "co_surfacing",
+      "columns": [
+        {
+          "name": "co_count",
+          "type": "integer",
+          "nullable": true,
+          "default": "1",
+          "pk_position": 0
+        },
+        {
+          "name": "last_co_surfaced",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "obs_a_id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "obs_b_id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "relation_created",
+          "type": "integer",
+          "nullable": true,
+          "default": "0",
+          "pk_position": 0
+        },
+        {
+          "name": "relation_proposed",
+          "type": "integer",
+          "nullable": true,
+          "default": "0",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "co_surfacing_unique_1",
+          "unique": true,
+          "columns": [
+            "obs_a_id",
+            "obs_b_id"
+          ],
+          "where": null
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "co_surfacing_obs_a_id_fkey",
+          "columns": [
+            "obs_a_id"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION"
+        },
+        {
+          "name": "co_surfacing_obs_b_id_fkey",
+          "columns": [
+            "obs_b_id"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION"
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_co_surfacing_count",
+          "unique": false,
+          "columns": [
+            "co_count"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_co_surfacing_pair",
+          "unique": false,
+          "columns": [
+            "obs_a_id",
+            "obs_b_id"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "consolidation_groups",
+      "columns": [
+        {
+          "name": "consolidated_observation_id",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "entity_id",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "source_observation_ids",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "summary",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "consolidation_groups_consolidated_observation_id_fkey",
+          "columns": [
+            "consolidated_observation_id"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION"
+        },
+        {
+          "name": "consolidation_groups_entity_id_fkey",
+          "columns": [
+            "entity_id"
+          ],
+          "references": {
+            "table": "entities",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION"
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_consolidation_entity",
+          "unique": false,
+          "columns": [
+            "entity_id"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "context_entries",
+      "columns": [
+        {
+          "name": "content",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "links",
+          "type": "text",
+          "nullable": true,
+          "default": "'[]'",
+          "pk_position": 0
+        },
+        {
+          "name": "scope",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_context_scope",
+          "unique": false,
+          "columns": [
+            "scope"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "daemon_proposals",
+      "columns": [
+        {
+          "name": "confidence",
+          "type": "real",
+          "nullable": true,
+          "default": "0.5",
+          "pk_position": 0
+        },
+        {
+          "name": "from_entity_id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "from_obs_id",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "proposal_type",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "proposed_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "reason",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "resolved_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "nullable": true,
+          "default": "'pending'",
+          "pk_position": 0
+        },
+        {
+          "name": "to_entity_id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "to_obs_id",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "daemon_proposals_from_entity_id_fkey",
+          "columns": [
+            "from_entity_id"
+          ],
+          "references": {
+            "table": "entities",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION"
+        },
+        {
+          "name": "daemon_proposals_from_obs_id_fkey",
+          "columns": [
+            "from_obs_id"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION"
+        },
+        {
+          "name": "daemon_proposals_to_entity_id_fkey",
+          "columns": [
+            "to_entity_id"
+          ],
+          "references": {
+            "table": "entities",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION"
+        },
+        {
+          "name": "daemon_proposals_to_obs_id_fkey",
+          "columns": [
+            "to_obs_id"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION"
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_daemon_proposals_status",
+          "unique": false,
+          "columns": [
+            "status"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_daemon_proposals_type",
+          "unique": false,
+          "columns": [
+            "proposal_type"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "dormant_observations",
+      "columns": [
+        {
+          "name": "first_marked",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "last_rescue_attempt",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "observation_id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "rescue_attempts",
+          "type": "integer",
+          "nullable": true,
+          "default": "0",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "dormant_observations_observation_id_key",
+          "unique": true,
+          "columns": [
+            "observation_id"
+          ],
+          "where": null
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "dormant_observations_observation_id_fkey",
+          "columns": [
+            "observation_id"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION"
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_dormant_observation",
+          "unique": false,
+          "columns": [
+            "observation_id"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "embeddings",
+      "columns": [
+        {
+          "name": "content",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "embedding",
+          "type": "vector(768)",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "metadata",
+          "type": "jsonb",
+          "nullable": true,
+          "default": "'{}'",
+          "pk_position": 0
+        },
+        {
+          "name": "source_id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "source_type",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_embeddings_source",
+          "unique": false,
+          "columns": [
+            "source_type",
+            "source_id"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_embeddings_vector",
+          "unique": false,
+          "columns": [
+            "embedding"
+          ],
+          "where": null,
+          "method": "ivfflat",
+          "options": "lists = 100",
+          "opclass": "vector_cosine_ops"
+        }
+      ]
+    },
+    {
+      "name": "entities",
+      "columns": [
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "entity_type",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "intentionally_isolated",
+          "type": "integer",
+          "nullable": true,
+          "default": "0",
+          "pk_position": 0
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "primary_context",
+          "type": "text",
+          "nullable": false,
+          "default": "'default'",
+          "pk_position": 0
+        },
+        {
+          "name": "salience",
+          "type": "text",
+          "nullable": true,
+          "default": "'active'",
+          "pk_position": 0
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [
+        {
+          "name": "entities_unique_1",
+          "unique": true,
+          "columns": [
+            "name",
+            "primary_context"
+          ],
+          "where": null
+        }
+      ],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_entities_context",
+          "unique": false,
+          "columns": [
+            "primary_context"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_entities_intentionally_isolated",
+          "unique": false,
+          "columns": [
+            "intentionally_isolated"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_entities_name",
+          "unique": false,
+          "columns": [
+            "name"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_entities_salience",
+          "unique": false,
+          "columns": [
+            "salience"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "identity",
+      "columns": [
+        {
+          "name": "connections",
+          "type": "text",
+          "nullable": true,
+          "default": "'[]'",
+          "pk_position": 0
+        },
+        {
+          "name": "content",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "section",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "timestamp",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "weight",
+          "type": "real",
+          "nullable": true,
+          "default": "0.7",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_identity_section",
+          "unique": false,
+          "columns": [
+            "section"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "images",
+      "columns": [
+        {
+          "name": "access_count",
+          "type": "integer",
+          "nullable": true,
+          "default": "0",
+          "pk_position": 0
+        },
+        {
+          "name": "archived_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "context",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "emotion",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "entity_id",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "last_accessed_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "last_surfaced_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "novelty_score",
+          "type": "real",
+          "nullable": true,
+          "default": "1.0",
+          "pk_position": 0
+        },
+        {
+          "name": "observation_id",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "path",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "surface_count",
+          "type": "integer",
+          "nullable": true,
+          "default": "0",
+          "pk_position": 0
+        },
+        {
+          "name": "weight",
+          "type": "text",
+          "nullable": true,
+          "default": "'medium'",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "images_entity_id_fkey",
+          "columns": [
+            "entity_id"
+          ],
+          "references": {
+            "table": "entities",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION"
+        },
+        {
+          "name": "images_observation_id_fkey",
+          "columns": [
+            "observation_id"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION"
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_images_entity",
+          "unique": false,
+          "columns": [
+            "entity_id"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "journals",
+      "columns": [
+        {
+          "name": "content",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "emotion",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "entry_date",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "journal_type",
+          "type": "text",
+          "nullable": true,
+          "default": "'entry'",
+          "pk_position": 0
+        },
+        {
+          "name": "tags",
+          "type": "text",
+          "nullable": true,
+          "default": "'[]'",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_journals_date",
+          "unique": false,
+          "columns": [
+            "entry_date"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_journals_type",
+          "unique": false,
+          "columns": [
+            "journal_type"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "observation_versions",
+      "columns": [
+        {
+          "name": "changed_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "content",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "emotion",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "observation_id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "weight",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "observation_versions_observation_id_fkey",
+          "columns": [
+            "observation_id"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION"
+        }
+      ],
+      "checks": [],
+      "indexes": []
+    },
+    {
+      "name": "observations",
+      "columns": [
+        {
+          "name": "added_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "archived_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "certainty",
+          "type": "text",
+          "nullable": true,
+          "default": "'believed'",
+          "pk_position": 0
+        },
+        {
+          "name": "charge",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "charge_note",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "content",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "context",
+          "type": "text",
+          "nullable": true,
+          "default": "'default'",
+          "pk_position": 0
+        },
+        {
+          "name": "emotion",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "entity_id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "last_accessed_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "last_surfaced_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "linked_observation_id",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "novelty_score",
+          "type": "real",
+          "nullable": true,
+          "default": "1.0",
+          "pk_position": 0
+        },
+        {
+          "name": "resolution_note",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "salience",
+          "type": "text",
+          "nullable": true,
+          "default": "'active'",
+          "pk_position": 0
+        },
+        {
+          "name": "sit_count",
+          "type": "integer",
+          "nullable": true,
+          "default": "0",
+          "pk_position": 0
+        },
+        {
+          "name": "source",
+          "type": "text",
+          "nullable": true,
+          "default": "'conversation'",
+          "pk_position": 0
+        },
+        {
+          "name": "source_date",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "superseded_by",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "supersedes",
+          "type": "integer",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "surface_count",
+          "type": "integer",
+          "nullable": true,
+          "default": "0",
+          "pk_position": 0
+        },
+        {
+          "name": "valid_from",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "valid_until",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "weight",
+          "type": "text",
+          "nullable": true,
+          "default": "'medium'",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [
+        {
+          "name": "observations_entity_id_fkey",
+          "columns": [
+            "entity_id"
+          ],
+          "references": {
+            "table": "entities",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "CASCADE",
+          "on_update": "NO ACTION"
+        },
+        {
+          "name": "observations_linked_observation_id_fkey",
+          "columns": [
+            "linked_observation_id"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION"
+        },
+        {
+          "name": "observations_superseded_by_fkey",
+          "columns": [
+            "superseded_by"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION"
+        },
+        {
+          "name": "observations_supersedes_fkey",
+          "columns": [
+            "supersedes"
+          ],
+          "references": {
+            "table": "observations",
+            "columns": [
+              "id"
+            ]
+          },
+          "on_delete": "NO ACTION",
+          "on_update": "NO ACTION"
+        }
+      ],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_observations_access",
+          "unique": false,
+          "columns": [
+            "access_count"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_observations_archived",
+          "unique": false,
+          "columns": [
+            "archived_at"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_observations_charge",
+          "unique": false,
+          "columns": [
+            "charge"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_observations_context",
+          "unique": false,
+          "columns": [
+            "context"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_observations_entity",
+          "unique": false,
+          "columns": [
+            "entity_id"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_observations_last_accessed",
+          "unique": false,
+          "columns": [
+            "last_accessed_at"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_observations_resolved",
+          "unique": false,
+          "columns": [
+            "resolved_at"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_observations_superseded",
+          "unique": false,
+          "columns": [
+            "superseded_by"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_observations_surfaced",
+          "unique": false,
+          "columns": [
+            "last_surfaced_at"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_observations_valid_until",
+          "unique": false,
+          "columns": [
+            "valid_until"
+          ],
+          "where": null
+        },
+        {
+          "name": "idx_observations_weight",
+          "unique": false,
+          "columns": [
+            "weight"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "relational_state",
+      "columns": [
+        {
+          "name": "feeling",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "intensity",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "person",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "timestamp",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_relational_person",
+          "unique": false,
+          "columns": [
+            "person"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "relations",
+      "columns": [
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "from_context",
+          "type": "text",
+          "nullable": true,
+          "default": "'default'",
+          "pk_position": 0
+        },
+        {
+          "name": "from_entity",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "relation_type",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "store_in",
+          "type": "text",
+          "nullable": true,
+          "default": "'default'",
+          "pk_position": 0
+        },
+        {
+          "name": "to_context",
+          "type": "text",
+          "nullable": true,
+          "default": "'default'",
+          "pk_position": 0
+        },
+        {
+          "name": "to_entity",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": []
+    },
+    {
+      "name": "subconscious",
+      "columns": [
+        {
+          "name": "data",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "state_type",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "integer",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": []
+    },
+    {
+      "name": "tensions",
+      "columns": [
+        {
+          "name": "context",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "pole_a",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "pole_b",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "resolution",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "resolved_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "sit_count",
+          "type": "integer",
+          "nullable": true,
+          "default": "0",
+          "pk_position": 0
+        },
+        {
+          "name": "sit_notes",
+          "type": "text",
+          "nullable": true,
+          "default": "'[]'",
+          "pk_position": 0
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "nullable": true,
+          "default": "'active'",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_tensions_status",
+          "unique": false,
+          "columns": [
+            "status"
+          ],
+          "where": null
+        }
+      ]
+    },
+    {
+      "name": "threads",
+      "columns": [
+        {
+          "name": "content",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "context",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "priority",
+          "type": "text",
+          "nullable": true,
+          "default": "'medium'",
+          "pk_position": 0
+        },
+        {
+          "name": "resolution",
+          "type": "text",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "resolved_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "source",
+          "type": "text",
+          "nullable": true,
+          "default": "'self'",
+          "pk_position": 0
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "nullable": true,
+          "default": "'active'",
+          "pk_position": 0
+        },
+        {
+          "name": "thread_type",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 0
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": "now()",
+          "pk_position": 0
+        },
+        {
+          "name": "id",
+          "type": "text",
+          "nullable": false,
+          "default": null,
+          "pk_position": 1
+        }
+      ],
+      "primary_key": [
+        "id"
+      ],
+      "unique_constraints": [],
+      "foreign_keys": [],
+      "checks": [],
+      "indexes": [
+        {
+          "name": "idx_threads_status",
+          "unique": false,
+          "columns": [
+            "status"
+          ],
+          "where": null
+        }
+      ]
+    }
+  ]
+}
