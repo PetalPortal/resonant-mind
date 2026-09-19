@@ -14,8 +14,10 @@
     "test": "vitest run",
     "test:postgres": "vitest run tests/postgres-v4.integration.test.ts",
     "test:registry": "vitest run tests/registry.test.ts",
+    "test:migration": "vitest run tests/migration",
     "scan:release": "node scripts/scan-release.mjs",
     "db:migrate": "node scripts/migrate-postgres.mjs",
+    "migrate:v32": "node scripts/v32-to-v4/cli.mjs",
     "verify": "npm run typecheck && npm test && npm run scan:release && npm audit --audit-level=moderate"
   },
   "dependencies": {
