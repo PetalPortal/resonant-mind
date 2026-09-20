@@ -92,11 +92,12 @@ export async function applyV4Migrations({ client, migrations = [], lockId = V4_M
         try {
           await client.query(migration.sql);
           await client.query('INSERT INTO public.schema_migrations(version, checksum) VALUES ($1, $2)', [migration.file, migration.checksum]);
-          await client.query('COMMIT');
-          transactionStarted = false;
+          if (!atomic) { await client.query('COMMIT'); transactionStarted = false; }
         } catch (error) {
-          try { await client.query('ROLLBACK'); } catch { /* preserve migration error */ }
-          transactionStarted = false;
+          if (!atomic && transactionStarted) {
+            try { await client.query('ROLLBACK'); } catch { /* preserve migration error */ }
+            transactionStarted = false;
+          }
           throw error;
         }
         applied.push({ ...migration, status: 'applied' });

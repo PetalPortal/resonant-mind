@@ -1,16 +1,19 @@
 import { describe, expect, it } from 'vitest';
 import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
-import { readV4Migrations, migrationSetSha256, V4_MIGRATOR_VERSION } from '../../scripts/migrate-postgres.mjs';
+import { applyV4Migrations, readV4Migrations, migrationSetSha256, V4_MIGRATOR_VERSION } from '../../scripts/migrate-postgres.mjs';
 import { buildIdMaps } from '../../scripts/v32-to-v4/transform/id-map.mjs';
 import { assertTargetRow, TARGET_SCHEMAS } from '../../scripts/v32-to-v4/transform/target-schema.mjs';
 import { transformRelational } from '../../scripts/v32-to-v4/transform/relational.mjs';
 import {
   buildDryRunReport,
+  bindRelationalPlan,
   importPlan,
   normalizePostgresIdentity,
+  inspectTarget,
   parseTargetIdentity,
   prepareTarget,
   validateRelationalPlan,
+  resetSequence,
 } from '../../scripts/v32-to-v4/target/postgres.mjs';
 
 const HASH = 'a'.repeat(64);
@@ -23,8 +26,8 @@ const PLAN = {
   migration_set_sha256: 'c'.repeat(64),
   migrator_version: '4.0.1',
   members: {
-    entities: [{ id: 1, name: 'Alice', entity_type: 'person', primary_context: 'default', salience: 'active' }],
-    people: [{ id: 1, name: 'Alice', kind: 'person', primary_context: 'default', salience: 'active' }],
+    entities: [{ id: 1, name: 'Alice', entity_type: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-02T00:00:00.000Z' }],
+    people: [{ id: 1, name: 'Alice', kind: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-02T00:00:00.000Z' }],
     observations: [{ id: 4, entity_id: 1, person_id: 1, content: 'hello', linked_observation_id: 5 }],
   },
   coverage: {},
@@ -104,6 +107,73 @@ describe('fresh-v4 review regressions', () => {
     expect(validateRelationalPlan(invalid).foreign_keys.violations).toEqual(expect.any(Array));
   });
 
+  it('rejects an empty user schema, an unrelated extension, and incomplete catalog inventory', async () => {
+    const base = [
+      { when: /SHOW transaction_read_only/u, result: { rows: [{ transaction_read_only: 'on' }] } },
+      { when: /current_database/u, result: { rows: [{ database_name: 'target', database_oid: '13', server_address: null, server_port: '5432', server_version: '160000' }] } },
+    ];
+    for (const inventory of [
+      { object_count: '0', schemas: ['public', 'empty_user_schema'], extensions: ['plpgsql'], vector_schemas: [], objects: [], inventory_complete: true },
+      { object_count: '0', schemas: ['public'], extensions: ['plpgsql', 'hstore'], vector_schemas: [], objects: [], inventory_complete: true },
+      { object_count: '0', schemas: ['public'], extensions: ['plpgsql'], vector_schemas: [], objects: [] },
+    ]) {
+      const client = fakeClient([...base, { when: /non_system_objects/u, result: { rows: [inventory] } }]);
+      await expect(inspectTarget({ client, sourceIdentity: TARGET })).rejects.toMatchObject({ code: expect.stringMatching(/^RMIG-E-TARGET-(NOT-FRESH|SCHEMA)$/u) });
+    }
+  });
+
+  it('allows only public plus the vector extension schema when the catalog is complete', async () => {
+    const client = fakeClient([
+      { when: /SHOW transaction_read_only/u, result: { rows: [{ transaction_read_only: 'on' }] } },
+      { when: /current_database/u, result: { rows: [{ database_name: 'target', database_oid: '14', server_address: null, server_port: '5432', server_version: '160000' }] } },
+      { when: /non_system_objects/u, result: { rows: [{ object_count: '0', schemas: ['public', 'vector_schema'], extensions: ['plpgsql', 'vector'], vector_schemas: ['vector_schema'], objects: [], inventory_complete: true }] } },
+      { when: /pg_available_extensions/u, result: { rows: [{ available: true }] } },
+    ]);
+    await expect(inspectTarget({ client, sourceIdentity: TARGET })).resolves.toMatchObject({ object_count: 0, pgvector: true });
+  });
+
+  it('keeps one immutable bound hash from transform through staging and dry-run', async () => {
+    const source = { entities: [{ id: 1, name: 'Alice', entity_type: 'person', primary_context: 'default', salience: 'active' }] };
+    const idMaps = buildIdMaps(source, { items: [] });
+    const transformed = transformRelational({
+      tables: source,
+      compiledPolicy: { id_map: idMaps.idMap, name_map: idMaps.serializedNames, mapping_tables: ['entities'], losses: [] },
+      migrationId: PLAN.migration_id,
+      bundleManifestSha256: HASH,
+      compiledPolicySha256: 'b'.repeat(64),
+    });
+    const migrationSet = migrationSetSha256(await readV4Migrations());
+    const bound = bindRelationalPlan(transformed, { migrationSetSha256: migrationSet, migratorVersion: V4_MIGRATOR_VERSION });
+    const restaged = bindRelationalPlan({ ...bound, members: structuredClone(bound.members) }, { migrationSetSha256: migrationSet, migratorVersion: V4_MIGRATOR_VERSION });
+    const report = buildDryRunReport({ plan: restaged, targetIdentity: TARGET, migrationSetSha256: migrationSet, migratorVersion: V4_MIGRATOR_VERSION, targetStateSha256: HASH });
+    expect(transformed.plan_payload_sha256).toBe(transformed.plan_sha256);
+    expect(bound.plan_payload_sha256).toBe(transformed.plan_payload_sha256);
+    expect(bound.plan_sha256).not.toBe(bound.plan_payload_sha256);
+    expect(restaged.plan_sha256).toBe(bound.plan_sha256);
+    expect(report.plan_sha256).toBe(bound.plan_sha256);
+    expect(report.migration_set_sha256).toBe(migrationSet);
+    expect(report.migrator_version).toBe(V4_MIGRATOR_VERSION);
+  });
+
+  it('rejects a staged routed row with any trigger-derived field mismatch or extra row', async () => {
+    const entity = { id: 1, name: 'Alice', entity_type: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-02T00:00:00.000Z' };
+    const routed = { id: 1, name: 'Alice', kind: 'person', primary_context: 'default', salience: 'active', created_at: entity.created_at, updated_at: entity.updated_at };
+    const badPlan = { ...PLAN, members: { entities: [entity], people: [routed, { ...routed, id: 2 }], nodes: [] } };
+    expect(validateRelationalPlan(badPlan).routing.violations).toEqual(expect.arrayContaining([expect.objectContaining({ reason: 'extra people/nodes row' })]));
+    const badDryRun = buildDryRunReport({ plan: badPlan, targetIdentity: TARGET, migrationSetSha256: PLAN.migration_set_sha256, migratorVersion: PLAN.migrator_version, stageContentSha256: canonicalSha256(badPlan.members), targetStateSha256: HASH });
+    await expect(importPlan({ client: fakeClient(), plan: badPlan, dryRun: badDryRun, targetIdentity: TARGET, stagingSchema: 'rmig_stage' })).rejects.toMatchObject({ code: 'RMIG-E-VALIDATION' });
+  });
+
+  it('uses transactional ALTER SEQUENCE RESTART and never non-transactional setval', async () => {
+    const client = fakeClient([
+      { when: /pg_get_serial_sequence/u, result: { rows: [{ schema_name: 'public', sequence_name: 'entities_id_seq' }] } },
+      { when: /COALESCE\(MAX\(id\), 0\)/u, result: { rows: [{ max_id: '9' }] } },
+    ]);
+    await resetSequence(client, 'entities');
+    expect(client.calls.some(({ text }) => /setval/u.test(text))).toBe(false);
+    expect(client.calls.some(({ text }) => text === 'ALTER SEQUENCE "public"."entities_id_seq" RESTART WITH 10')).toBe(true);
+  });
+
   it('defers forward and cyclic observation self-FKs until all observations exist', async () => {
     const currentMigrations = await readV4Migrations();
     const currentSet = migrationSetSha256(currentMigrations);
@@ -116,13 +186,14 @@ describe('fresh-v4 review regressions', () => {
     const dryRun = buildDryRunReport({ plan: cyclePlan, targetIdentity: TARGET, migrationSetSha256: currentSet, migratorVersion: V4_MIGRATOR_VERSION, stageContentSha256: stageHash, targetStateSha256: targetStateHash });
     const planHash = dryRun.plan_sha256;
     const rows = Object.entries(cyclePlan.members).flatMap(([table, values]) => values.map((row, row_index) => ({ table_name: table, row_index, row_json: row, row_sha256: canonicalSha256(row) })));
-    const client = fakeClient([
+    const responses = [
       { when: /current_database/u, result: { rows: [{ database_name: 'mind', database_oid: '42', server_address: null, server_port: '5432', server_version: '160000' }] } },
       { when: /\/\* target_state \*\//u, result: { rows: [] } },
       { when: /SELECT version, checksum FROM public\.schema_migrations/u, result: { rows: currentMigrations.map(({ file, checksum }) => ({ version: file, checksum })) } },
       { when: /FROM "rmig_stage"\."run_metadata"/u, result: { rows: [{ migration_id: cyclePlan.migration_id, bundle_manifest_sha256: cyclePlan.bundle_manifest_sha256, compiled_policy_sha256: cyclePlan.compiled_policy_sha256, target_identity_sha256: TARGET.database_identity_sha256, migration_set_sha256: currentSet, migrator_version: V4_MIGRATOR_VERSION, plan_sha256: planHash, stage_content_sha256: stageHash, dry_run_receipt_sha256: dryRun.receipt_sha256, target_state_sha256: targetStateHash, status: 'dry-run' }], rowCount: 1 } },
       { when: /run_rows/u, result: { rows } },
-    ]);
+    ];
+    const client = fakeClient(responses);
     await expect(importPlan({ client, plan: cyclePlan, dryRun, targetIdentity: TARGET, stagingSchema: 'rmig_stage' })).resolves.toMatchObject({ status: 'complete', inserted_rows: 3 });
     const inserts = client.calls.filter(({ text }) => /^INSERT INTO "public"/u.test(text));
     const updates = client.calls.filter(({ text }) => /^UPDATE public\."observations"/u.test(text));
@@ -130,6 +201,12 @@ describe('fresh-v4 review regressions', () => {
     expect(inserts.filter(({ text }) => text.includes('"observations"'))).toHaveLength(2);
     expect(inserts.filter(({ text }) => text.includes('"linked_observation_id"'))).toHaveLength(0);
     expect(updates).toHaveLength(2);
+    expect(client.calls.some(({ text }) => /setval/u.test(text))).toBe(false);
+    const failedClient = fakeClient(responses);
+    await expect(importPlan({ client: failedClient, plan: cyclePlan, dryRun, targetIdentity: TARGET, stagingSchema: 'rmig_stage', injectFailureAfter: 1 })).rejects.toThrow('injected import failure');
+    expect(failedClient.calls.filter(({ text }) => text === 'COMMIT')).toHaveLength(0);
+    expect(failedClient.calls.filter(({ text }) => text === 'ROLLBACK')).toHaveLength(1);
+    expect(failedClient.calls.some(({ text }) => /setval/u.test(text))).toBe(false);
   });
   it('refuses direct import without a bound staging schema', async () => {
     const client = fakeClient();
@@ -138,11 +215,53 @@ describe('fresh-v4 review regressions', () => {
     expect(client.calls).toEqual([]);
   });
 
+  it('uses one transaction for atomic migrations and rolls back the ledger with a partial failure', async () => {
+    const migrations = [
+      { file: '0001_first.sql', sql: 'CREATE TABLE first_marker (id integer);' },
+      { file: '0002_second.sql', sql: 'CREATE TABLE second_marker (id integer); -- FAIL' },
+    ];
+    const successClient = fakeClient([
+      { when: /has_ledger/u, result: { rows: [{ has_ledger: false, has_entities: false }] } },
+      { when: /SELECT version, checksum FROM public\.schema_migrations/u, result: { rows: [] } },
+    ]);
+    await expect(applyV4Migrations({ client: successClient, migrations, atomic: true })).resolves.toHaveLength(2);
+    expect(successClient.calls.filter(({ text }) => text === 'BEGIN')).toHaveLength(1);
+    expect(successClient.calls.filter(({ text }) => text === 'COMMIT')).toHaveLength(1);
+    expect(successClient.calls.filter(({ text }) => text === 'ROLLBACK')).toHaveLength(0);
+    const client = fakeClient([
+      { when: /has_ledger/u, result: { rows: [{ has_ledger: false, has_entities: false }] } },
+      { when: /SELECT version, checksum FROM public\.schema_migrations/u, result: { rows: [] } },
+      { when: /FAIL/u, throw: new Error('migration failed') },
+    ]);
+    await expect(applyV4Migrations({ client, migrations, atomic: true })).rejects.toThrow('migration failed');
+    const sql = client.calls.map(({ text }) => text);
+    expect(sql.filter((text) => text === 'BEGIN')).toHaveLength(1);
+    expect(sql.filter((text) => text === 'COMMIT')).toHaveLength(0);
+    expect(sql.filter((text) => text === 'ROLLBACK')).toHaveLength(1);
+    expect(sql.indexOf('BEGIN')).toBeLessThan(sql.indexOf(migrations[0].sql));
+    expect(sql.indexOf('ROLLBACK')).toBeGreaterThan(sql.indexOf(migrations[1].sql));
+    expect(sql.filter((text) => /INSERT INTO public\.schema_migrations/u.test(text))).toHaveLength(1);
+  });
+
+  it('keeps non-atomic migration mode as one transaction per migration', async () => {
+    const migrations = [
+      { file: '0001_first.sql', sql: 'CREATE TABLE first_marker (id integer);' },
+      { file: '0002_second.sql', sql: 'CREATE TABLE second_marker (id integer);' },
+    ];
+    const client = fakeClient([
+      { when: /has_ledger/u, result: { rows: [{ has_ledger: false, has_entities: false }] } },
+      { when: /SELECT version, checksum FROM public\.schema_migrations/u, result: { rows: [] } },
+    ]);
+    await expect(applyV4Migrations({ client, migrations })).resolves.toHaveLength(2);
+    expect(client.calls.filter(({ text }) => text === 'BEGIN')).toHaveLength(2);
+    expect(client.calls.filter(({ text }) => text === 'COMMIT')).toHaveLength(2);
+  });
+
   it('preparation uses an atomic runner mode so a failed migration cannot strand a partial ledger', async () => {
     const client = fakeClient([
       { when: /SHOW transaction_read_only/u, result: { rows: [{ transaction_read_only: 'on' }] } },
       { when: /current_database/u, result: { rows: [{ database_name: 'target', database_oid: '12', server_address: null, server_port: '5432', server_version: '160000' }] } },
-      { when: /non_system_objects/u, result: { rows: [{ object_count: '0', schemas: [] }] } },
+      { when: /non_system_objects/u, result: { rows: [{ object_count: '0', schemas: ['public'], extensions: ['plpgsql'], vector_schemas: [], objects: [], inventory_complete: true }] } },
       { when: /pg_available_extensions/u, result: { rows: [{ available: true }] } },
     ]);
     const runner = { run: async (options) => { expect(options).toMatchObject({ atomic: true }); throw new Error('migration failed'); } };

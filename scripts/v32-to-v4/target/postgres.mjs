@@ -6,7 +6,6 @@ import { V4_MIGRATION_LOCK_ID, V4_MIGRATOR_VERSION, migrationSetSha256, readV4Mi
 import { postgresIdentityFromRow, normalizePostgresIdentity as normalizeIdentityRow } from '../lib/postgres-identity.mjs';
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/u;
-const SYSTEM_SCHEMAS = new Set(['pg_catalog', 'information_schema']);
 export const IMPORT_ORDER = Object.freeze(['entities', 'people', 'nodes', 'threads', 'context_entries', 'relational_state', 'identity', 'journals', 'subconscious', 'tensions', 'observations', 'observation_versions', 'relations', 'consolidation_groups', 'images', 'daemon_proposals', 'orphan_observations', 'co_surfacing']);
 const SELF_REFERENCE_FIELDS = Object.freeze(['linked_observation_id', 'superseded_by', 'supersedes']);
 const REFERENCES = Object.freeze({
@@ -40,27 +39,34 @@ export const TARGET_IDENTITY_QUERY = `
 `;
 export const TARGET_OBJECT_QUERY = `
   /* non_system_objects */
-  WITH app_objects AS (
-    SELECT n.nspname AS schema_name, c.relname AS object_name, 'relation' AS object_kind
-    FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid
+  WITH user_schemas AS (
+    SELECT n.oid, n.nspname
+    FROM pg_catalog.pg_namespace n
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'
-      AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
-      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid WHERE d.objid = c.oid AND d.deptype = 'e')
+  ), extension_list AS (
+    SELECT e.extname, n.nspname AS schema_name
+    FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+  ), app_objects AS (
+    SELECT n.nspname AS schema_name, c.relname AS object_name, 'relation' AS object_kind
+    FROM user_schemas n JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid
+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
     UNION ALL
     SELECT n.nspname, p.proname, 'routine'
-    FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_proc p ON p.pronamespace = n.oid
-    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
-      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid WHERE d.objid = p.oid AND d.deptype = 'e')
+    FROM user_schemas n JOIN pg_catalog.pg_proc p ON p.pronamespace = n.oid
+    WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
     UNION ALL
     SELECT n.nspname, t.typname, 'type'
-    FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_type t ON t.typnamespace = n.oid
-    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND t.typrelid = 0 AND t.typtype IN ('c', 'd', 'e')
-      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d JOIN pg_catalog.pg_extension e ON e.oid = d.refobjid WHERE d.objid = t.oid AND d.deptype = 'e')
+    FROM user_schemas n JOIN pg_catalog.pg_type t ON t.typnamespace = n.oid
+    WHERE t.typrelid = 0 AND t.typtype IN ('c', 'd', 'e')
+      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = t.oid AND d.deptype = 'e')
   )
-  SELECT count(*)::text AS object_count,
-         COALESCE(array_agg(DISTINCT schema_name ORDER BY schema_name), ARRAY[]::text[]) AS schemas,
-         COALESCE(jsonb_agg(jsonb_build_object('schema', schema_name, 'name', object_name, 'kind', object_kind) ORDER BY schema_name, object_kind, object_name), '[]'::jsonb) AS objects
-  FROM app_objects
+  SELECT true AS inventory_complete,
+         COALESCE((SELECT array_agg(nspname ORDER BY nspname) FROM user_schemas), ARRAY[]::text[]) AS schemas,
+         COALESCE((SELECT array_agg(extname ORDER BY extname) FROM extension_list), ARRAY[]::text[]) AS extensions,
+         COALESCE((SELECT array_agg(schema_name ORDER BY schema_name) FROM extension_list WHERE extname = 'vector'), ARRAY[]::text[]) AS vector_schemas,
+         (SELECT count(*)::text FROM app_objects) AS object_count,
+         COALESCE((SELECT jsonb_agg(jsonb_build_object('schema', schema_name, 'name', object_name, 'kind', object_kind) ORDER BY schema_name, object_kind, object_name) FROM app_objects), '[]'::jsonb) AS objects
 `;
 export const TARGET_VECTOR_QUERY = `SELECT (EXISTS (SELECT 1 FROM pg_catalog.pg_available_extensions WHERE name = 'vector') OR EXISTS (SELECT 1 FROM pg_catalog.pg_extension WHERE extname = 'vector')) AS available`;
 export const TARGET_STATE_QUERY = `
@@ -98,10 +104,18 @@ export async function inspectTarget({ client, sourceIdentity } = {}) {
     const targetIdentity = await readIdentityInTransaction(client);
     if (sourceIdentity?.database_identity_sha256 === targetIdentity.database_identity_sha256) throw refusal('RMIG-E-SAME-SOURCE-TARGET', 'inspect-target', 'Source and target resolve to the same PostgreSQL database.');
     const objectResult = await query(client, TARGET_OBJECT_QUERY);
-    const objectRow = objectResult.rows?.[0] ?? {};
-    const objectCount = Number(objectRow.object_count ?? 0);
-    const schemas = Array.isArray(objectRow.schemas) ? objectRow.schemas.filter((name) => typeof name === 'string' && !SYSTEM_SCHEMAS.has(name)).sort() : [];
-    if (!Number.isSafeInteger(objectCount) || objectCount !== 0 || schemas.length > 0) throw refusal('RMIG-E-TARGET-NOT-FRESH', 'inspect-target', 'Target PostgreSQL database has user relations, sequences, types, routines, or other application objects. Required extensions are ignored.', { object_count: Number.isSafeInteger(objectCount) ? objectCount : null, schemas });
+    const objectRow = objectResult.rows?.[0];
+    const inventoryComplete = objectRow?.inventory_complete === true || String(objectRow?.inventory_complete).toLowerCase() === 't';
+    const schemas = objectRow?.schemas;
+    const extensions = objectRow?.extensions;
+    const vectorSchemas = objectRow?.vector_schemas;
+    const objects = objectRow?.objects;
+    const objectCount = Number(objectRow?.object_count);
+    if (!inventoryComplete || !Array.isArray(schemas) || !Array.isArray(extensions) || !Array.isArray(vectorSchemas) || !Array.isArray(objects) || !Number.isSafeInteger(objectCount) || objectCount < 0 || objectCount !== objects.length) throw refusal('RMIG-E-TARGET-SCHEMA', 'inspect-target', 'Target catalog inventory was incomplete or internally inconsistent; refusing closed-world freshness.');
+    const disallowedExtensions = extensions.filter((name) => !['plpgsql', 'vector'].includes(name));
+    const allowedSchemas = new Set(['public', ...vectorSchemas]);
+    const disallowedSchemas = schemas.filter((name) => typeof name !== 'string' || !allowedSchemas.has(name));
+    if (disallowedExtensions.length || disallowedSchemas.length || objectCount !== 0) throw refusal('RMIG-E-TARGET-NOT-FRESH', 'inspect-target', 'Target PostgreSQL database has user schemas, unrelated extensions, or application objects; required vector extension objects alone are allowed.', { object_count: objectCount, schemas: disallowedSchemas, extensions: disallowedExtensions, objects });
     const vectorResult = await query(client, TARGET_VECTOR_QUERY);
     if (vectorResult.rows?.[0]?.available !== true && String(vectorResult.rows?.[0]?.available).toLowerCase() !== 't') throw refusal('RMIG-E-TARGET-SCHEMA', 'inspect-target', 'Target PostgreSQL database does not provide pgvector.');
     return Object.freeze({ target_identity: targetIdentity, object_count: 0, schemas: [], pgvector: true, read_only_proven: true });
@@ -110,7 +124,23 @@ export async function inspectTarget({ client, sourceIdentity } = {}) {
 
 function stagingName(migrationId, bundleHash) { const id = String(migrationId).replace(/[^A-Za-z0-9_]/gu, '_').slice(0, 28); return `rmig_${id}_${bundleHash.slice(0, 16)}`.slice(0, 63); }
 function stageContentSha256(members) { return canonicalSha256(Object.fromEntries(Object.entries(members ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([table, rows]) => [table, rows ?? []]))); }
-function planSha256(plan) { const { plan_sha256: _ignored, ...body } = plan; return canonicalSha256(body); }
+function planEnvelope(plan, { migrationSetSha256: setHash, migratorVersion } = {}) {
+  const { plan_sha256: _ignoredHash, plan_payload_sha256: _ignoredPayloadHash, migration_set_sha256: _ignoredSetHash, migrator_version: _ignoredVersion, ...payload } = plan ?? {};
+  if (setHash !== undefined) payload.migration_set_sha256 = setHash;
+  if (migratorVersion !== undefined) payload.migrator_version = migratorVersion;
+  return payload;
+}
+function planPayloadSha256(plan) { return canonicalSha256(planEnvelope(plan)); }
+function boundPlanSha256(plan, fields) { return canonicalSha256(planEnvelope(plan, fields)); }
+export function bindRelationalPlan(plan, { migrationSetSha256: setHash, migratorVersion = V4_MIGRATOR_VERSION } = {}) {
+  requireHash(setHash, 'migrationSetSha256');
+  if (typeof migratorVersion !== 'string' || migratorVersion.length === 0) throw new TypeError('migratorVersion is required.');
+  const payloadHash = plan.plan_payload_sha256 ?? planPayloadSha256(plan);
+  if (plan.plan_payload_sha256 !== undefined && plan.plan_payload_sha256 !== payloadHash) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'bind-plan', 'The relational payload hash is invalid.');
+  const bound = { ...plan, migration_set_sha256: setHash, migrator_version: migratorVersion, plan_payload_sha256: payloadHash };
+  bound.plan_sha256 = boundPlanSha256(bound, { migrationSetSha256: setHash, migratorVersion });
+  return Object.freeze(bound);
+}
 function stageMetadataFields({ migrationId, bundleManifestSha256, compiledPolicySha256, targetIdentitySha256, migrationSetSha256: setHash, migratorVersion, planSha256: hash, stageContentSha256: contentHash }) { return [migrationId, bundleManifestSha256, compiledPolicySha256, targetIdentitySha256, setHash, migratorVersion, hash, contentHash, 'prepared']; }
 
 function insertSql(table, row, schema = 'public') {
@@ -129,8 +159,9 @@ async function createStaging(client, schemaName, fields) {
 async function stagePlan(client, schemaName, plan, fields) {
   if (!plan || !plan.members) throw new TypeError('The staging plan must contain members.');
   if (plan.bundle_manifest_sha256 !== fields.bundleManifestSha256 || plan.compiled_policy_sha256 !== fields.compiledPolicySha256 || plan.migration_id !== fields.migrationId) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'prepare-target', 'The staging plan is not bound to the requested migration inputs.');
-  if (plan.plan_sha256 !== undefined && plan.plan_sha256 !== planSha256(plan)) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'prepare-target', 'The staging plan hash is invalid.');
-  const members = plan.members;
+  const bound = bindRelationalPlan(plan, { migrationSetSha256: fields.migrationSetSha256, migratorVersion: fields.migratorVersion });
+  if (plan.plan_sha256 !== undefined && plan.plan_sha256 !== planPayloadSha256(plan) && plan.plan_sha256 !== bound.plan_sha256) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'prepare-target', 'The staging plan hash is invalid.');
+  const members = bound.members;
   const contentHash = stageContentSha256(members);
   for (const table of Object.keys(members).sort()) {
     if (!TARGET_SCHEMAS[table]) throw new TypeError(`Unsupported staging table ${table}.`);
@@ -146,8 +177,8 @@ async function stagePlan(client, schemaName, plan, fields) {
   await query(client, `DROP TABLE IF EXISTS ${qtable(schemaName, 'run_rows')}`);
   await query(client, `CREATE TABLE ${qtable(schemaName, 'run_rows')} (table_name TEXT NOT NULL, row_index INTEGER NOT NULL, row_json JSONB NOT NULL, row_sha256 TEXT NOT NULL, PRIMARY KEY (table_name, row_index))`);
   for (const table of Object.keys(members).sort()) for (const [index, row] of (members[table] ?? []).entries()) await query(client, `INSERT INTO ${qtable(schemaName, 'run_rows')} (table_name, row_index, row_json, row_sha256) VALUES ($1, $2, $3::jsonb, $4)`, [table, index, canonicalJson(row), canonicalSha256(row)]);
-  await query(client, `UPDATE ${qtable(schemaName, 'run_metadata')} SET plan_sha256 = $1, stage_content_sha256 = $2, status = $3, updated_at = NOW() WHERE migration_id = $4`, [planSha256(plan), contentHash, 'staged', fields.migrationId]);
-  return { plan_sha256: planSha256(plan), stage_content_sha256: contentHash };
+  await query(client, `UPDATE ${qtable(schemaName, 'run_metadata')} SET plan_sha256 = $1, stage_content_sha256 = $2, status = $3, updated_at = NOW() WHERE migration_id = $4`, [bound.plan_sha256, contentHash, 'staged', fields.migrationId]);
+  return { plan_sha256: bound.plan_sha256, stage_content_sha256: contentHash };
 }
 
 async function readStagedMembers(client, schemaName, tables) {
@@ -190,8 +221,9 @@ export async function prepareTarget({ client, migrationRunner, sourceIdentity, m
   if (!migrationRunner || typeof migrationRunner.run !== 'function') throw new TypeError('prepareTarget requires the immutable v4 migration runner.');
   const migrations = await readV4Migrations();
   const ledger = { migration_set_sha256: migrationSetSha256(migrations), migrator_version: V4_MIGRATOR_VERSION };
-  const planHash = plan ? planSha256(plan) : canonicalSha256({ migrationId });
-  const contentHash = plan ? stageContentSha256(plan.members) : canonicalSha256({});
+  const boundPlan = plan ? bindRelationalPlan(plan, ledger) : null;
+  const planHash = boundPlan?.plan_sha256 ?? canonicalSha256({ migrationId });
+  const contentHash = boundPlan ? stageContentSha256(boundPlan.members) : canonicalSha256({});
   let created = false; let runnerCompleted = false;
   try {
     await createStaging(client, schemaName, { migrationId, bundleManifestSha256, compiledPolicySha256, targetIdentitySha256: targetIdentity.database_identity_sha256, migrationSetSha256: ledger.migration_set_sha256, migratorVersion: ledger.migrator_version, planSha256: planHash, stageContentSha256: contentHash });
@@ -234,7 +266,7 @@ function validationFor(plan) {
       try { assertTargetRow(table, row); } catch (error) { enums.push({ table, reason: error.message, row_sha256: canonicalSha256(row) }); }
     }
   }
-  return { foreign_keys: { violations: foreignKeys.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b))) }, uniqueness: { violations: uniqueness.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b))) }, enums: { violations: enums.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b))) } };
+  return { foreign_keys: { violations: foreignKeys.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b))) }, uniqueness: { violations: uniqueness.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b))) }, enums: { violations: enums.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b))) }, routing: { violations: routingViolations(members) } };
 }
 
 export function validateRelationalPlan(plan) { return validationFor(plan); }
@@ -245,7 +277,8 @@ export function buildDryRunReport({ plan, targetIdentity, migrationSetSha256: se
   const members = tableRows(plan); const counts = { tables: {} };
   for (const table of Object.keys(members).sort()) { const coverage = plan.coverage?.[table] ?? {}; counts.tables[table] = { source_rows: coverage.source_rows ?? members[table].length, transformed_rows: coverage.transformed_rows ?? coverage.mapped_rows ?? members[table].length, excluded_rows: coverage.excluded_rows ?? 0, rows: members[table].length, sha256: canonicalSha256(members[table]) }; }
   const losses = Array.isArray(plan.losses) ? plan.losses : [];
-  const report = { format_version: 1, report_type: 'fresh-v4-dry-run', status, migration_id: plan.migration_id, bundle_manifest_sha256: plan.bundle_manifest_sha256, compiled_policy_sha256: plan.compiled_policy_sha256, migration_set_sha256: setHash ?? plan.migration_set_sha256 ?? null, migrator_version: migratorVersion, plan_sha256: plan.plan_sha256 ?? planSha256(plan), stage_content_sha256: contentHash ?? stageContentSha256(members), target_identity_sha256: targetIdentity.database_identity_sha256, target_state_sha256: stateHash ?? null, counts, validation: validationFor(plan), losses: { count: losses.length, sha256: canonicalSha256(losses), entries: losses } };
+  const boundHash = setHash && migratorVersion ? boundPlanSha256(plan, { migrationSetSha256: setHash, migratorVersion }) : (plan.plan_sha256 ?? planPayloadSha256(plan));
+  const report = { format_version: 1, report_type: 'fresh-v4-dry-run', status, migration_id: plan.migration_id, bundle_manifest_sha256: plan.bundle_manifest_sha256, compiled_policy_sha256: plan.compiled_policy_sha256, migration_set_sha256: setHash ?? plan.migration_set_sha256 ?? null, migrator_version: migratorVersion, plan_sha256: boundHash, stage_content_sha256: contentHash ?? stageContentSha256(members), target_identity_sha256: targetIdentity.database_identity_sha256, target_state_sha256: stateHash ?? null, counts, validation: validationFor(plan), losses: { count: losses.length, sha256: canonicalSha256(losses), entries: losses } };
   report.receipt_sha256 = canonicalSha256(report); return Object.freeze(report);
 }
 
@@ -253,16 +286,35 @@ function verifyDryRun(plan, dryRun, targetIdentity) {
   if (!dryRun || dryRun.status !== 'validated' || !dryRun.migration_set_sha256 || !dryRun.migrator_version || !dryRun.plan_sha256 || !dryRun.stage_content_sha256 || !dryRun.target_state_sha256) throw refusal('RMIG-E-DRY-RUN', 'import', 'Import requires a successful bound PostgreSQL dry-run receipt.');
   const expected = buildDryRunReport({ plan, targetIdentity, migrationSetSha256: dryRun.migration_set_sha256, migratorVersion: dryRun.migrator_version, stageContentSha256: dryRun.stage_content_sha256, targetStateSha256: dryRun.target_state_sha256, status: 'validated' });
   if (dryRun.receipt_sha256 !== expected.receipt_sha256 || canonicalJson(dryRun) !== canonicalJson(expected)) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'import', 'Dry-run receipt does not match the exact import inputs.');
-  if (dryRun.validation.foreign_keys.violations.length || dryRun.validation.uniqueness.violations.length || dryRun.validation.enums.violations.length) throw refusal('RMIG-E-VALIDATION', 'Dry-run validation found rows that cannot be imported.');
+  if (dryRun.validation.foreign_keys.violations.length || dryRun.validation.uniqueness.violations.length || dryRun.validation.enums.violations.length || dryRun.validation.routing.violations.length) throw refusal('RMIG-E-VALIDATION', 'import', 'Dry-run validation found rows that cannot be imported.');
 }
 
-function compatibilityCheck(members) {
-  const entities = members.entities ?? []; if (entities.length === 0) throw refusal('RMIG-E-ENTITY-COMPAT', 'Fresh-v4 import requires public.entities compatibility rows for released foreign keys and routing triggers.');
-  const routed = [...(members.people ?? []), ...(members.nodes ?? [])];
+function triggerKind(entity) {
+  if (['peer_AI', 'AI peer'].includes(entity.entity_type)) return 'peer_ai';
+  if (entity.entity_type === 'kin') return 'person';
+  return entity.entity_type;
+}
+function triggerTable(entity) { return ['self', 'person', 'peer_ai', 'peer_AI', 'AI peer', 'kin'].includes(entity.entity_type) ? 'people' : 'nodes'; }
+function routingViolations(members) {
+  const entities = members.entities ?? [];
+  const routed = [...(members.people ?? []).map((row) => ({ table: 'people', row })), ...(members.nodes ?? []).map((row) => ({ table: 'nodes', row }))];
+  const violations = [];
+  const expectedIds = new Set();
   for (const entity of entities) {
-    const matches = routed.filter((row) => String(row.id) === String(entity.id));
-    if (matches.length !== 1 || matches[0].name !== entity.name || matches[0].kind !== entity.entity_type) throw refusal('RMIG-E-ENTITY-COMPAT', 'Entity compatibility and people/nodes routing rows disagree.');
+    expectedIds.add(String(entity.id));
+    if (entity.created_at === undefined || entity.updated_at === undefined) { violations.push({ id: entity.id, reason: 'trigger timestamps are not hash-bound' }); continue; }
+    const expected = { id: entity.id, name: entity.name, kind: triggerKind(entity), salience: entity.salience ?? 'active', primary_context: entity.primary_context ?? 'default', created_at: entity.created_at, updated_at: entity.updated_at };
+    const matches = routed.filter(({ table, row }) => String(row.id) === String(entity.id));
+    if (matches.length !== 1 || matches[0].table !== triggerTable(entity) || canonicalJson(matches[0].row) !== canonicalJson(expected)) violations.push({ id: entity.id, expected, actual: matches.map(({ table, row }) => ({ table, row })) });
   }
+  for (const item of routed) if (!expectedIds.has(String(item.row.id))) violations.push({ id: item.row.id, reason: 'extra people/nodes row', actual: item });
+  return violations.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)));
+}
+function compatibilityCheck(members) {
+  const entities = members.entities ?? [];
+  if (entities.length === 0) throw refusal('RMIG-E-ENTITY-COMPAT', 'import', 'Fresh-v4 import requires public.entities compatibility rows for released foreign keys and routing triggers.');
+  const violations = routingViolations(members);
+  if (violations.length) throw refusal('RMIG-E-ENTITY-COMPAT', 'import', 'Staged people/nodes rows are not exactly the rows released entities triggers generate.', { violations });
 }
 
 async function insertRows(client, table, rows) {
@@ -276,7 +328,21 @@ async function insertRows(client, table, rows) {
   for (const item of deferred) await query(client, `UPDATE public.${quoteIdentifier(table)} SET ${quoteIdentifier(item.field)} = $1 WHERE id = $2`, [item.value, item.id]);
   return rows.length;
 }
-async function resetSequence(client, table) { if (!SERIAL_TABLES.has(table)) return; await query(client, `SELECT setval(pg_get_serial_sequence($1, $2), COALESCE(MAX(id), 1), MAX(id) IS NOT NULL) FROM public.${quoteIdentifier(table)}`, [`public.${table}`, 'id']); }
+export async function resetSequence(client, table) {
+  if (!SERIAL_TABLES.has(table)) return;
+  const sequence = await query(client, `
+    SELECT n.nspname AS schema_name, c.relname AS sequence_name
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.oid = pg_get_serial_sequence($1, $2)::regclass
+  `, [`public.${table}`, 'id']);
+  const sequenceRow = sequence.rows?.[0];
+  if (!sequenceRow) return;
+  const maximum = await query(client, `SELECT COALESCE(MAX(id), 0)::text AS max_id FROM public.${quoteIdentifier(table)}`);
+  const maxId = Number(maximum.rows?.[0]?.max_id ?? 0);
+  if (!Number.isSafeInteger(maxId) || maxId < 0 || maxId === Number.MAX_SAFE_INTEGER) throw refusal('RMIG-E-TARGET-SCHEMA', 'import', `Cannot safely compute the next ${table} sequence value.`);
+  await query(client, `ALTER SEQUENCE ${qtable(sequenceRow.schema_name, sequenceRow.sequence_name)} RESTART WITH ${maxId + 1}`);
+}
 
 async function validateOnTarget(client, members) {
   await query(client, 'BEGIN');
@@ -331,7 +397,7 @@ export async function importPlan({ client, plan, dryRun, targetIdentity, staging
       ['dry_run_receipt_sha256', row.dry_run_receipt_sha256, dryRun.receipt_sha256],
       ['target_state_sha256', row.target_state_sha256, dryRun.target_state_sha256],
       ['status', row.status, 'dry-run'],
-      ['plan_sha256', row.plan_sha256, plan.plan_sha256 ?? planSha256(plan)],
+      ['plan_sha256', row.plan_sha256, boundPlanSha256(plan, { migrationSetSha256: ledger.migration_set_sha256, migratorVersion: ledger.migrator_version })],
       ['stage_content_sha256', row.stage_content_sha256, dryRun.stage_content_sha256],
     ].filter(([, actual, expected]) => actual !== expected).map(([field]) => field);
     if (metadataMismatches.length) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'import', 'Staging metadata is not bound to the exact successful dry-run receipt.', { fields: metadataMismatches });
@@ -339,8 +405,8 @@ export async function importPlan({ client, plan, dryRun, targetIdentity, staging
     if (existing.rows?.length) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'import', 'This migration already has an import receipt; exact-once import refuses a rerun.');
     const members = await readStagedMembers(client, stagingSchema, Object.keys(plan.members));
     if (stageContentSha256(members) !== dryRun.stage_content_sha256) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'import', 'Staged content changed after dry-run.');
-    const stagedPlan = { ...plan, members, plan_sha256: row.plan_sha256, migration_set_sha256: row.migration_set_sha256 };
-    if (planSha256(stagedPlan) !== row.plan_sha256) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'import', 'Staged plan hash does not match run metadata.');
+    const stagedPlan = bindRelationalPlan({ ...plan, members }, { migrationSetSha256: row.migration_set_sha256, migratorVersion: row.migrator_version });
+    if (stagedPlan.plan_sha256 !== row.plan_sha256) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'import', 'Staged plan hash does not match run metadata.');
     compatibilityCheck(members);
     let inserted = 0;
     for (const table of IMPORT_ORDER) {

@@ -121,7 +121,7 @@ function assertNoLegacyVectors(value, path = 'artifact') {
   if (Array.isArray(value)) return value.forEach((item, index) => assertNoLegacyVectors(item, `${path}[${index}]`));
   if (typeof value === 'object') for (const [key, child] of Object.entries(value)) { if (['embedding','vector','values','embedding_vector'].includes(key)) throw new TypeError(`Legacy vector payload survived at ${path}.${key}.`); assertNoLegacyVectors(child, `${path}.${key}`); }
 }
-export function transformRelational({ bundle, tables: inputTables, compiledPolicy, policy, migrationId, bundleManifestSha256, compiledPolicySha256 } = {}) {
+export function transformRelational({ bundle, tables: inputTables, compiledPolicy, policy, migrationId, bundleManifestSha256, compiledPolicySha256, migrationSetSha256, migratorVersion } = {}) {
   const tables = inputTables ?? rowsOf(bundle); const compiled = compiledPolicy ?? policy; if (!compiled) throw new TypeError('transformRelational requires a compiled policy.');
   const mappings = MAP.filter((mapping) => (compiled.mapping_tables ?? MAP.map(({ source_table }) => source_table)).includes(mapping.source_table) && Array.isArray(tables[mapping.source_table]));
   const members = {}; const coverage = {}; const embeddings = tables.embeddings ?? [];
@@ -156,8 +156,16 @@ export function transformRelational({ bundle, tables: inputTables, compiledPolic
   const imagePlan = buildImageInventory({ tables, idMaps: { idMap: compiled.id_map }, linkMap: compiled.link_map, excludedRows: compiled.excluded_rows, migrationId: migrationId ?? compiled.migration_id, bundleManifestSha256: bundleManifestSha256 ?? compiled.bundle_manifest_sha256, compiledPolicySha256: compiledPolicySha256 ?? compiled.plan_sha256 });
   const reembedPlan = buildReembedPlan({ members, images: imagePlan, migrationId: migrationId ?? compiled.migration_id, bundleManifestSha256: bundleManifestSha256 ?? compiled.bundle_manifest_sha256, compiledPolicySha256: compiledPolicySha256 ?? compiled.plan_sha256 });
   const inventory = vectorInventory(embeddings, Object.values(tables).flatMap((rows) => Array.isArray(rows) ? rows : [])); const staging = { legacy_embedding_inventory: embeddings.map((row, index) => ({ inventory_id: row.id ?? index, source_type: row.source_type, source_id: row.source_id, has_legacy_vector: rowHasVector(row) })) };
-  const result = { format_version: FORMAT_VERSION, plan_type: 'relational-staging', migration_id: migrationId ?? compiled.migration_id, bundle_manifest_sha256: bundleManifestSha256 ?? compiled.bundle_manifest_sha256, compiled_policy_sha256: compiledPolicySha256 ?? compiled.plan_sha256, members, staging, legacy_vector_inventory: inventory, coverage, audit: compiled.audit ?? [], losses: compiled.losses ?? [], merge_audit: compiled.merge_audit ?? [], image_inventory: imagePlan, reembed_jobs: reembedPlan, legacy_vectors_imported: false };
-  assertNoLegacyVectors(result); result.plan_sha256 = canonicalSha256(result); return result;
+  const execution = {};
+  if (migrationSetSha256 !== undefined) execution.migration_set_sha256 = migrationSetSha256;
+  if (migratorVersion !== undefined) execution.migrator_version = migratorVersion;
+  const result = { format_version: FORMAT_VERSION, plan_type: 'relational-staging', migration_id: migrationId ?? compiled.migration_id, bundle_manifest_sha256: bundleManifestSha256 ?? compiled.bundle_manifest_sha256, compiled_policy_sha256: compiledPolicySha256 ?? compiled.plan_sha256, ...execution, members, staging, legacy_vector_inventory: inventory, coverage, audit: compiled.audit ?? [], losses: compiled.losses ?? [], merge_audit: compiled.merge_audit ?? [], image_inventory: imagePlan, reembed_jobs: reembedPlan, legacy_vectors_imported: false };
+  assertNoLegacyVectors(result);
+  const { migration_set_sha256: _setHash, migrator_version: _version, ...payload } = result;
+  result.plan_payload_sha256 = canonicalSha256(payload);
+  const { plan_payload_sha256: _ignoredPayloadHash, ...boundEnvelope } = result;
+  result.plan_sha256 = canonicalSha256(boundEnvelope);
+  return result;
 }
 export async function* streamRelational(input) { const result = transformRelational(input); for (const [table, rows] of Object.entries(result.members)) for (const row of rows) yield { table, row }; }
 export const transformAll = transformRelational;

@@ -40,8 +40,8 @@ const PLAN = {
   bundle_manifest_sha256: 'c'.repeat(64),
   compiled_policy_sha256: 'd'.repeat(64),
   members: {
-    entities: [{ id: 1, name: 'Alice', entity_type: 'person', primary_context: 'default', salience: 'active' }],
-    people: [{ id: 1, name: 'Alice', kind: 'person' }],
+    entities: [{ id: 1, name: 'Alice', entity_type: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-02T00:00:00.000Z' }],
+    people: [{ id: 1, name: 'Alice', kind: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-02T00:00:00.000Z' }],
     observations: [{ id: 4, entity_id: 1, person_id: 1, content: 'hello' }],
   },
   coverage: {
@@ -79,7 +79,7 @@ it('refuses a target with arbitrary schemas or the source identity without write
   const client = fakeClient([
     { when: /SHOW transaction_read_only/, result: { rows: [{ transaction_read_only: 'on' }] } },
     { when: /current_database/, result: { rows: [{ database_name: 'target', database_oid: '11', server_address: '127.0.0.1', server_port: '5432', server_version: '160000' }] } },
-    { when: /non_system_objects/, result: { rows: [{ object_count: '1', schemas: ['arbitrary'] }] } },
+    { when: /non_system_objects/, result: { rows: [{ object_count: '1', schemas: ['arbitrary'], extensions: ['plpgsql'], vector_schemas: [], objects: [{ schema: 'arbitrary', name: 'thing', kind: 'relation' }], inventory_complete: true }] } },
     { when: /pg_available_extensions/, result: { rows: [{ available: true }] } },
   ]);
   await expect(inspectTarget({ client, sourceIdentity: IDENTITY })).rejects.toMatchObject({ code: 'RMIG-E-TARGET-NOT-FRESH' });
@@ -90,7 +90,7 @@ it('requires pgvector and distinguishes a fresh target identity', async () => {
   const client = fakeClient([
     { when: /SHOW transaction_read_only/, result: { rows: [{ transaction_read_only: 'on' }] } },
     { when: /current_database/, result: { rows: [{ database_name: 'target', database_oid: '12', server_address: '127.0.0.1', server_port: '5432', server_version: '160000' }] } },
-    { when: /non_system_objects/, result: { rows: [{ object_count: '0', schemas: [] }] } },
+    { when: /non_system_objects/, result: { rows: [{ object_count: '0', schemas: ['public'], extensions: ['plpgsql'], vector_schemas: [], objects: [], inventory_complete: true }] } },
     { when: /pg_available_extensions/, result: { rows: [{ available: false }] } },
   ]);
   await expect(inspectTarget({ client, sourceIdentity: IDENTITY })).rejects.toMatchObject({ code: 'RMIG-E-TARGET-SCHEMA' });
@@ -100,7 +100,7 @@ it('binds staging preparation to migration hashes and cleans the schema on failu
   const client = fakeClient([
     { when: /SHOW transaction_read_only/, result: { rows: [{ transaction_read_only: 'on' }] } },
     { when: /current_database/, result: { rows: [{ database_name: 'target', database_oid: '12', server_address: '127.0.0.1', server_port: '5432', server_version: '160000' }] } },
-    { when: /non_system_objects/, result: { rows: [{ object_count: '0', schemas: [] }] } },
+    { when: /non_system_objects/, result: { rows: [{ object_count: '0', schemas: ['public'], extensions: ['plpgsql'], vector_schemas: [], objects: [], inventory_complete: true }] } },
     { when: /pg_available_extensions/, result: { rows: [{ available: true }] } },
     { when: /has_ledger/, result: { rows: [{ has_ledger: false, has_entities: false }] } },
   ]);
