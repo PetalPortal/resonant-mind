@@ -6,9 +6,18 @@ import { assertNodeVersion } from './lib/runtime.mjs';
 import { humanInspectReport, inspectSource, parseInspectSourceArgs } from './commands/inspect-source.mjs';
 import { exportCommand, humanExportResult, parseExportArgs } from './commands/export.mjs';
 import { humanVerifyResult, parseVerifyBundleArgs, verifyBundleCommand } from './commands/verify-bundle.mjs';
+import {
+  appendCheckpoint,
+  maybeInjectCheckpointFault,
+} from './lib/checkpoints.mjs';
 import { canonicalJson } from './lib/canonical-json.mjs';
 import { compilePolicyCommand, humanCompilePolicyResult, parseCompilePolicyArgs } from './commands/compile-policy.mjs';
 import { targetCommand, humanTargetResult } from './commands/target.mjs';
+import { parsePlanImagesArgs, planImagesCommand, humanPlanImagesResult } from './commands/plan-images.mjs';
+import { parseCopyImagesArgs, copyImagesCommand, humanCopyImagesResult } from './commands/copy-images.mjs';
+import { parsePlanReembedArgs, planReembedCommand, humanPlanReembedResult } from './commands/plan-reembed.mjs';
+import { parseValidateArgs, validateCommand, humanValidateResult } from './commands/validate.mjs';
+import { parseStatusArgs, statusCommand, humanStatusResult } from './commands/status.mjs';
 import {
   exitCodeFor,
   isMigrationRefusal,
@@ -51,6 +60,15 @@ Commands:
   status
 `;
 
+function stripCheckpointOptions(argv) {
+  const values = { checkpointDir: undefined, checkpointMigrationId: undefined, checkpointArtifactSha256: undefined }; const clean = [];
+  for (let index = 0; index < argv.length; index += 1) { const key = argv[index]; if (!['--checkpoint-dir', '--checkpoint-migration-id', '--checkpoint-artifact-sha256'].includes(key)) { clean.push(key); continue; } const value = argv[++index]; if (typeof value !== 'string' || value.startsWith('--')) throw new MigrationRefusal({ code: 'RMIG-E-CHECKPOINT', phase: 'runtime', summary: 'Checkpoint options require values.', safe_details: {}, report_path: null }); if (key === '--checkpoint-dir') values.checkpointDir = value; if (key === '--checkpoint-migration-id') values.checkpointMigrationId = value; if (key === '--checkpoint-artifact-sha256') values.checkpointArtifactSha256 = value; }
+  return { clean, values };
+}
+function recordCheckpoint(result, name, options) {
+  if (!options.checkpointDir) return result; const migrationId = options.checkpointMigrationId ?? result.migration_id; const artifact = options.checkpointArtifactSha256 ?? result.artifact_sha256 ?? result.receipt_sha256 ?? result.plan_sha256 ?? result.report_sha256; if (typeof migrationId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/u.test(migrationId) || typeof artifact !== 'string' || !/^[0-9a-f]{64}$/u.test(artifact)) throw new MigrationRefusal({ code: 'RMIG-E-CHECKPOINT', phase: 'runtime', summary: 'Checkpoint options must bind a migration ID and artifact SHA-256.', safe_details: {}, report_path: null }); appendCheckpoint(options.checkpointDir, { name, migration_id: migrationId, artifact_sha256: artifact, details: { command: name } }); maybeInjectCheckpointFault(name); return result;
+}
+
 export function main({
   argv = process.argv.slice(2),
   nodeMajor,
@@ -63,7 +81,7 @@ export function main({
     json = argv.includes('--json');
     const positionalArgv = argv.filter((argument) => argument !== '--json');
     assertNodeVersion(nodeMajor);
-    const [command, ...commandArgs] = positionalArgv;
+    const [command, ...rawCommandArgs] = positionalArgv;
     if (command === undefined || command === '--help') {
       writeStdout(help);
       return 0;
@@ -79,12 +97,15 @@ export function main({
       });
     }
 
+    const { clean: commandArgs, values: checkpointOptions } = stripCheckpointOptions(rawCommandArgs);
+    maybeInjectCheckpointFault('__command-start__');
     if (runCommand !== undefined) return runCommand(command, commandArgs);
     if (command === 'export') {
       const parsed = parseExportArgs(commandArgs);
       return exportCommand(parsed).then((result) => {
-        if (json) writeStdout(`${canonicalJson(result.manifest)}\n`);
-        else writeStdout(humanExportResult(result));
+        const checked = recordCheckpoint(result, 'bundle-finalized', checkpointOptions);
+        if (json) writeStdout(`${canonicalJson(checked.manifest)}\n`);
+        else writeStdout(humanExportResult(checked));
         return 0;
       });
     }
@@ -99,15 +120,23 @@ export function main({
     if (command === 'compile-policy') {
       const parsed = parseCompilePolicyArgs(commandArgs);
       const result = compilePolicyCommand(parsed);
-      writeStdout(json ? `${canonicalJson(result)}\n` : humanCompilePolicyResult(result));
+      const checked = recordCheckpoint(result, 'policy-compiled', checkpointOptions);
+      writeStdout(json ? `${canonicalJson(checked)}\n` : humanCompilePolicyResult(checked));
       return 0;
     }
     if (['inspect-target', 'prepare-target', 'dry-run', 'import'].includes(command)) {
       return targetCommand(command, commandArgs).then((result) => {
-        writeStdout(json ? `${canonicalJson(result)}\n` : humanTargetResult(result));
+        const checkpointName = command === 'prepare-target' ? 'target-prepared' : command === 'dry-run' ? 'dry-run-accepted' : command === 'import' ? 'import-committed' : 'source-inspected';
+        const checked = recordCheckpoint(result, checkpointName, checkpointOptions);
+        writeStdout(json ? `${canonicalJson(checked)}\n` : humanTargetResult(checked));
         return 0;
       });
     }
+    if (command === 'plan-images') return planImagesCommand(parsePlanImagesArgs(commandArgs)).then((result) => { const checked = recordCheckpoint(result, 'source-inspected', checkpointOptions); writeStdout(json ? `${canonicalJson(checked)}\n` : humanPlanImagesResult(checked)); return 0; });
+    if (command === 'copy-images') return copyImagesCommand(parseCopyImagesArgs(commandArgs)).then((result) => { const checked = recordCheckpoint(result, 'images-complete', checkpointOptions); writeStdout(json ? `${canonicalJson(checked)}\n` : humanCopyImagesResult(checked)); return 0; });
+    if (command === 'plan-reembed') return Promise.resolve(planReembedCommand(parsePlanReembedArgs(commandArgs))).then((result) => { const checked = recordCheckpoint(result, 'reembed-complete', checkpointOptions); writeStdout(json ? `${canonicalJson(checked)}\n` : humanPlanReembedResult(checked)); return 0; });
+    if (command === 'validate') return Promise.resolve(validateCommand(parseValidateArgs(commandArgs))).then((result) => { const checked = recordCheckpoint(result, 'validation-complete', checkpointOptions); writeStdout(json ? `${canonicalJson(checked)}\n` : humanValidateResult(checked)); return 0; });
+    if (command === 'status') return Promise.resolve(statusCommand({ ...parseStatusArgs(commandArgs), operatorCutoverAcknowledged: commandArgs.includes('--operator-cutover-ack') })).then((result) => { writeStdout(json ? `${canonicalJson(result)}\n` : humanStatusResult(result)); return 0; });
     if (command !== 'inspect-source') {
       throw new MigrationRefusal({
         code: 'RMIG-E-COMMAND-NOT-IMPLEMENTED',
@@ -119,8 +148,9 @@ export function main({
     }
     const parsed = parseInspectSourceArgs(commandArgs);
     return inspectSource(parsed).then((report) => {
-      if (json) writeStdout(`${canonicalJson(report)}\n`);
-      else writeStdout(humanInspectReport(report, parsed.reportPath));
+      const checked = recordCheckpoint(report, 'source-inspected', checkpointOptions);
+      if (json) writeStdout(`${canonicalJson(checked)}\n`);
+      else writeStdout(humanInspectReport(checked, parsed.reportPath));
       return 0;
     });
   } catch (error) {

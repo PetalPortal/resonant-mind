@@ -32,7 +32,14 @@ export const REPORT_STATUSES = Object.freeze([
   'failed',
   'in-progress',
   'complete',
+  'exported',
+  'review-required',
+  'dry-run-accepted',
+  'data-imported',
+  'data-imported-images-pending',
   'data-imported-not-search-ready',
+  'ready-for-cutover',
+  'complete-after-operator-cutover-ack',
 ]);
 
 const SHA256 = /^[0-9a-f]{64}$/u;

@@ -32,6 +32,8 @@ const REMEDIATIONS = Object.freeze({
   'RMIG-E-RECEIPT-MISMATCH': 'Regenerate the receipt from the exact bound migration inputs.',
   'RMIG-E-IMAGE-INCOMPLETE': 'Complete and verify every planned image copy before final validation.',
   'RMIG-E-REEMBED-INCOMPLETE': 'Complete the re-embedding plan or use a reviewed defer policy.',
+  'RMIG-E-CHECKPOINT': 'Restore an intact append-only checkpoint chain and resume only with the same migration artifact.',
+  'RMIG-E-CHECKPOINT-FAULT': 'Unset the test fault injection variable outside NODE_ENV=test and rerun the migration.',
   'RMIG-E-VALIDATION': 'Resolve every validation finding and rerun final validation.',
   'RMIG-E-COMMAND-UNKNOWN': 'Run with --help and choose one listed migration command.',
   'RMIG-E-COMMAND-NOT-IMPLEMENTED': 'Use an implemented migration command or install a release that provides this phase.',
