@@ -10,6 +10,15 @@ import { normalizeTimestamp } from './value-map.mjs';
 
 const MAP = JSON.parse(readFileSync(new URL('../spec/v3.2-to-v4-map.json', import.meta.url), 'utf8'));
 const REF_TABLES = { entity_id:'entities', linked_observation_id:'observations', superseded_by:'observations', supersedes:'observations', observation_id:'observations', consolidated_observation_id:'observations', obs_a_id:'observations', obs_b_id:'observations', from_obs_id:'observations', to_obs_id:'observations', from_entity_id:'entities', to_entity_id:'entities' };
+// These nullable FK columns are omitted only when the compiled policy put a
+// reviewed nullification in link_map. Ordinary source NULLs remain explicit so
+// PostgreSQL cannot replace them with a column default.
+const OMIT_NULLIFIED_FK_FIELDS = new Set([
+  'observations.linked_observation_id', 'observations.superseded_by', 'observations.supersedes',
+  'images.entity_id', 'images.observation_id',
+  'consolidation_groups.entity_id', 'consolidation_groups.consolidated_observation_id',
+  'daemon_proposals.from_obs_id', 'daemon_proposals.to_obs_id', 'daemon_proposals.from_entity_id', 'daemon_proposals.to_entity_id',
+]);
 function rowsOf(bundle) { return bundle?.tables ?? bundle?.rows ?? bundle?.data ?? bundle ?? {}; }
 function sourceId(row, index) { return row.id ?? row.key ?? index; }
 function targetMap(compiled, table, id) { return compiled?.id_map?.[sourceKey(table, id)] ?? compiled?.id_maps?.byKey?.get(sourceKey(table, id)); }
@@ -73,6 +82,7 @@ function mapOne(mapping, row, index, compiled) {
     let value = targetFieldValue(mapping, targetTable, sourceField, targetField, row, compiled, rowHash);
     if (mapping.source_table === 'entities' && mapped?.field_values?.[sourceField] !== undefined) value = mapped.field_values[sourceField];
     if (mapping.source_table === 'entities' && sourceField === 'name') value = mapped?.target_name ?? value;
+    if (value === null && OMIT_NULLIFIED_FK_FIELDS.has(`${targetTable}.${targetField}`) && compiled.link_map?.[`${mapping.source_table}:${rowHash}:${sourceField}`] === null) continue;
     target[targetField] = value;
   }
   if (mapping.source_table === 'entities') {
@@ -94,8 +104,6 @@ function mapOne(mapping, row, index, compiled) {
     if (action === 'preserve-visits-and-resolve') { target.resolved_at = selected.resolved_at === null || selected.resolved_at === undefined ? target.resolved_at : normalizeTimestamp(selected.resolved_at, { choice: selected.resolved_at_choice, table:'tensions', field:'resolved_at' }); if (selected.resolution !== undefined) target.resolution = selected.resolution; }
     else if (action === 'preserve-visits-and-open') { target.resolved_at = null; target.resolution = null; }
   }
-  // A nullable reviewed link is omitted rather than emitting a stale source FK.
-  for (const [field, value] of Object.entries(target)) if (value === null && !TARGET_SCHEMAS[targetTable].required.includes(field)) delete target[field];
   if ((TARGET_SCHEMAS[targetTable].required ?? []).some((field) => (target[field] === null || target[field] === undefined) && !(TARGET_SCHEMAS[targetTable].generated ?? []).includes(field))) return null;
   assertTargetRow(targetTable, target);
   return target;

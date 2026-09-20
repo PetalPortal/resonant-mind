@@ -110,7 +110,7 @@ function allValues(value, callback) { callback(value); if (Array.isArray(value))
     expect(transformed.members.subconscious[0].data).toBe('{"nested":true}');
     expect(transformed.members.consolidation_groups[0].source_observation_ids).toEqual([30]);
     expect(transformed.members.images[0].view_count).toBe(0);
-    expect(transformed.members.images[0]).not.toHaveProperty('last_viewed_at');
+    expect(transformed.members.images[0]).toHaveProperty('last_viewed_at', null);
     expect(transformed.members.tensions[0]).toMatchObject({ visits: 1, last_visited: ISO });
     expect(transformed.members.tensions[0]).not.toHaveProperty('status');
     expect(transformed.members.tensions[0]).not.toHaveProperty('sit_notes');
@@ -132,6 +132,37 @@ function allValues(value, callback) { callback(value); if (Array.isArray(value))
     const plan = compilePolicy({ bundle, decisions: reviewed(bundle) });
     const transformed = transformRelational({ bundle, compiledPolicy: plan });
     expect(transformed.members.tensions[0]).toMatchObject({ id: 'tension-1', visits: 1, last_visited: ISO });
+  });
+
+  it('preserves explicit source NULLs for nullable target columns instead of applying defaults', () => {
+    const bundle = sourceFixture();
+    Object.assign(bundle.tables.observations[0], {
+      weight: null,
+      charge: null,
+      source: null,
+      context: null,
+      sit_count: null,
+      surface_count: null,
+      novelty_score: null,
+      access_count: null,
+    });
+    const plan = compilePolicy({ bundle, decisions: reviewed(bundle) });
+    const observation = transformRelational({ bundle, compiledPolicy: plan }).members.observations[0];
+    for (const field of ['weight', 'charge', 'source', 'context', 'sit_count', 'surface_count', 'novelty_score', 'access_count']) {
+      expect(observation).toHaveProperty(field, null);
+    }
+  });
+
+  it('omits only a reviewed nullable foreign key nullification', () => {
+    const bundle = sourceFixture();
+    bundle.tables.images[0].observation_id = 999;
+    const plan = compilePolicy({
+      bundle,
+      decisions: reviewed(bundle, (item) => item.type === 'broken-foreign-key' && item.source_table === 'images' && item.field === 'observation_id' ? 'null-if-allowed' : undefined),
+    });
+    const image = transformRelational({ bundle, compiledPolicy: plan }).members.images[0];
+    expect(image).not.toHaveProperty('observation_id');
+    expect(image).toHaveProperty('emotion', null);
   });
 
   it('counts and strips vector payloads outside the embeddings table', () => {

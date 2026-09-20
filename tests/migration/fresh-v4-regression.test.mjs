@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
 import { applyV4Migrations, readV4Migrations, migrationSetSha256, V4_MIGRATOR_VERSION } from '../../scripts/migrate-postgres.mjs';
 import { buildIdMaps } from '../../scripts/v32-to-v4/transform/id-map.mjs';
@@ -270,5 +270,53 @@ describe('fresh-v4 review regressions', () => {
       migrationId: PLAN.migration_id, bundleManifestSha256: PLAN.bundle_manifest_sha256,
       compiledPolicySha256: PLAN.compiled_policy_sha256,
     })).rejects.toThrow('migration failed');
+  });
+
+  it.each(['same-source', 'nonfresh-target', 'unknown-resume-schema'])('rejects %s resume attempts before any target write', async (scenario) => {
+    const client = fakeClient(scenario === 'same-source' ? [
+      { when: /SHOW transaction_read_only/u, result: { rows: [{ transaction_read_only: 'on' }] } },
+      { when: /current_database/u, result: { rows: [{ database_name: 'source', database_oid: '42', server_address: null, server_port: '5432', server_version: '160000' }] } },
+    ] : scenario === 'nonfresh-target' ? [
+      { when: /SHOW transaction_read_only/u, result: { rows: [{ transaction_read_only: 'on' }] } },
+      { when: /current_database/u, result: { rows: [{ database_name: 'target', database_oid: '43', server_address: null, server_port: '5432', server_version: '160000' }] } },
+      { when: /non_system_objects/u, result: { rows: [{ inventory_complete: true, schemas: ['public', 'private'], extensions: ['plpgsql'], vector_schemas: [], object_count: '1', objects: [{ schema: 'private', name: 'table', kind: 'relation' }] }] } },
+    ] : []);
+    await expect(prepareTarget({
+      client,
+      migrationRunner: { run: vi.fn() },
+      sourceIdentity: scenario === 'same-source' ? TARGET : { database_identity_sha256: 'f'.repeat(64) },
+      migrationId: PLAN.migration_id,
+      bundleManifestSha256: PLAN.bundle_manifest_sha256,
+      compiledPolicySha256: PLAN.compiled_policy_sha256,
+      resumeSchema: scenario === 'unknown-resume-schema' ? 'rmig_unknown' : 'rmig_existing',
+    })).rejects.toMatchObject({ code: 'RMIG-E-TARGET-NOT-FRESH' });
+    expect(client.calls.every(({ text }) => !/CREATE|ALTER|INSERT|UPDATE|DELETE|DROP/u.test(text))).toBe(true);
+  });
+
+  it('carries explicit NULLs from staged rows into import parameters', async () => {
+    const plan = {
+      ...PLAN,
+      members: {
+        entities: [{ id: 1, name: 'Alice', entity_type: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-02T00:00:00.000Z' }],
+        people: [{ id: 1, name: 'Alice', kind: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-02T00:00:00.000Z' }],
+        observations: [{ id: 4, entity_id: 1, person_id: 1, content: 'hello', weight: null, charge: null, source: null, context: null, sit_count: null, surface_count: null, novelty_score: null, access_count: null }],
+      },
+    };
+    const migrations = await readV4Migrations();
+    const migrationSet = migrationSetSha256(migrations);
+    const stageHash = canonicalSha256(plan.members);
+    const stateHash = canonicalSha256({ objects: [], counts: [] });
+    const dryRun = buildDryRunReport({ plan, targetIdentity: TARGET, migrationSetSha256: migrationSet, migratorVersion: V4_MIGRATOR_VERSION, stageContentSha256: stageHash, targetStateSha256: stateHash });
+    const rows = Object.entries(plan.members).flatMap(([table, values]) => values.map((row, row_index) => ({ table_name: table, row_index, row_json: row, row_sha256: canonicalSha256(row) })));
+    const client = fakeClient([
+      { when: /current_database/u, result: { rows: [{ database_name: 'mind', database_oid: '42', server_address: null, server_port: '5432', server_version: '160000' }] } },
+      { when: /\/\* target_state \*\//u, result: { rows: [] } },
+      { when: /SELECT version, checksum FROM public\.schema_migrations/u, result: { rows: migrations.map(({ file, checksum }) => ({ version: file, checksum })) } },
+      { when: /FROM "rmig_stage"\."run_metadata"/u, result: { rows: [{ migration_id: plan.migration_id, bundle_manifest_sha256: plan.bundle_manifest_sha256, compiled_policy_sha256: plan.compiled_policy_sha256, target_identity_sha256: TARGET.database_identity_sha256, migration_set_sha256: migrationSet, migrator_version: V4_MIGRATOR_VERSION, plan_sha256: dryRun.plan_sha256, stage_content_sha256: stageHash, dry_run_receipt_sha256: dryRun.receipt_sha256, target_state_sha256: stateHash, status: 'dry-run' }], rowCount: 1 } },
+      { when: /run_rows/u, result: { rows } },
+    ]);
+    await expect(importPlan({ client, plan, dryRun, targetIdentity: TARGET, stagingSchema: 'rmig_stage' })).resolves.toMatchObject({ status: 'complete', inserted_rows: 2 });
+    const observationInsert = client.calls.find(({ text }) => /^INSERT INTO "public"\."observations"/u.test(text));
+    expect(observationInsert.values.filter((value) => value === null)).toHaveLength(8);
   });
 });

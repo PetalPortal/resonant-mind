@@ -205,19 +205,10 @@ async function ledgerBinding(client) {
 export async function prepareTarget({ client, migrationRunner, sourceIdentity, migrationId, bundleManifestSha256, compiledPolicySha256, resumeSchema, plan } = {}) {
   requireHash(bundleManifestSha256, 'bundleManifestSha256'); requireHash(compiledPolicySha256, 'compiledPolicySha256');
   if (typeof migrationId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/u.test(migrationId)) throw new TypeError('migrationId is invalid.');
-  const target = resumeSchema ? { target_identity: await readTargetIdentity({ client }) } : await inspectTarget({ client, sourceIdentity });
-  const targetIdentity = target.target_identity ?? sourceIdentity; requireHash(targetIdentity.database_identity_sha256, 'target identity');
-  const schemaName = resumeSchema ?? stagingName(migrationId, bundleManifestSha256);
-  const metadata = resumeSchema ? await query(client, `SELECT migration_id, bundle_manifest_sha256, compiled_policy_sha256, target_identity_sha256, migration_set_sha256, migrator_version, plan_sha256, stage_content_sha256, status FROM ${qtable(schemaName, 'run_metadata')} WHERE migration_id = $1`, [migrationId]) : null;
-  if (resumeSchema) {
-    const row = metadata?.rows?.[0];
-    if (!row || row.bundle_manifest_sha256 !== bundleManifestSha256 || row.compiled_policy_sha256 !== compiledPolicySha256 || row.target_identity_sha256 !== targetIdentity.database_identity_sha256) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'prepare-target', 'Existing staging metadata does not match the requested migration inputs.');
-    const ledger = await ledgerBinding(client);
-    if (row.migration_set_sha256 !== ledger.migration_set_sha256 || row.migrator_version !== ledger.migrator_version) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'prepare-target', 'Existing staging metadata is not bound to the current v4 runner.');
-    await query(client, `CREATE TABLE IF NOT EXISTS public.migration_import_receipts (migration_id TEXT PRIMARY KEY, bundle_manifest_sha256 TEXT NOT NULL, compiled_policy_sha256 TEXT NOT NULL, target_identity_sha256 TEXT NOT NULL, migration_set_sha256 TEXT NOT NULL, migrator_version TEXT NOT NULL, plan_sha256 TEXT NOT NULL, stage_content_sha256 TEXT NOT NULL, target_state_sha256 TEXT NOT NULL, receipt_sha256 TEXT NOT NULL, status TEXT NOT NULL, imported_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
-    if (plan) await stagePlan(client, schemaName, plan, { migrationId, bundleManifestSha256, compiledPolicySha256, targetIdentitySha256: targetIdentity.database_identity_sha256, migrationSetSha256: ledger.migration_set_sha256, migratorVersion: ledger.migrator_version });
-    return Object.freeze({ schema: schemaName, target_identity: targetIdentity, status: plan ? 'staged' : row.status, resumed: true, hashes: { bundle_manifest_sha256: bundleManifestSha256, compiled_policy_sha256: compiledPolicySha256, migration_set_sha256: ledger.migration_set_sha256, migrator_version: ledger.migrator_version } });
-  }
+  if (resumeSchema !== undefined) throw refusal('RMIG-E-TARGET-NOT-FRESH', 'prepare-target', 'General resume is unsupported; discard the interrupted target and restart against a fresh target.');
+  const target = await inspectTarget({ client, sourceIdentity });
+  const targetIdentity = target.target_identity; requireHash(targetIdentity.database_identity_sha256, 'target identity');
+  const schemaName = stagingName(migrationId, bundleManifestSha256);
   if (!migrationRunner || typeof migrationRunner.run !== 'function') throw new TypeError('prepareTarget requires the immutable v4 migration runner.');
   const migrations = await readV4Migrations();
   const ledger = { migration_set_sha256: migrationSetSha256(migrations), migrator_version: V4_MIGRATOR_VERSION };
@@ -236,7 +227,7 @@ export async function prepareTarget({ client, migrationRunner, sourceIdentity, m
     return Object.freeze({ schema: schemaName, target_identity: targetIdentity, status: plan ? 'staged' : 'prepared', resumed: false, hashes: { bundle_manifest_sha256: bundleManifestSha256, compiled_policy_sha256: compiledPolicySha256, migration_set_sha256: ledger.migration_set_sha256, migrator_version: ledger.migrator_version } });
   } catch (error) {
     // The runner is atomic. If it completed, retain the hash-bound staging
-    // schema so resumeSchema is a supported path; otherwise remove our schema.
+    // schema for inspection; interrupted runs restart on a fresh target.
     if (created && !runnerCompleted) { try { await query(client, `DROP SCHEMA ${quoteIdentifier(schemaName)} CASCADE`); } catch { /* preserve original failure */ } }
     throw error;
   }

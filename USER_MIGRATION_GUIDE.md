@@ -158,7 +158,7 @@ node scripts/v32-to-v4/cli.mjs prepare-target \
   --plan <relational-staging-plan.json>
 ```
 
-`inspect-target` must report a distinct fresh target. `prepare-target` applies the released v4 migration set unchanged, verifies its checksums, and creates a run-scoped staging schema. It also accepts the current optional `--resume-schema <schema>` and `--plan <relational-staging-plan.json>` inputs. Existing/nonempty, same-source, or wrong-schema targets refuse.
+`inspect-target` must report a distinct fresh target. `prepare-target` applies the released v4 migration set unchanged, verifies its checksums, and creates a run-scoped staging schema. The optional `--resume-schema <schema>` input is intentionally rejected: there is no general resume contract, so discard an interrupted target and restart against a fresh target. `--plan <relational-staging-plan.json>` remains supported for the fresh preparation. Existing/nonempty, same-source, or wrong-schema targets refuse.
 
 ### 6. Dry run, then import
 
