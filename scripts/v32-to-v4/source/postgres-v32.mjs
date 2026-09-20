@@ -30,6 +30,11 @@ export function parseEnvReference(value) {
   return name;
 }
 
+function quoteIdentifier(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(value)) throw new TypeError('PostgreSQL identifier is not allowlisted.');
+  return `"${value}"`;
+}
+
 function actionName(value) {
   return ({ c: 'CASCADE', n: 'NO ACTION', r: 'RESTRICT', a: 'NO ACTION', d: 'SET DEFAULT', })[value] ?? 'NO ACTION';
 }
@@ -140,9 +145,13 @@ export class PostgresV32Adapter {
     }
   }
 
-  async *streamTable(table) {
+  async *streamTable(table, primaryKey = undefined) {
     if (!TABLES.has(table)) throw refusal('RMIG-E-SOURCE-FINGERPRINT', 'The requested table is not in the exact public v3.2 catalog.', { table });
-    const result = await this.#query(`SELECT * FROM "${table}"`);
+    const catalogTable = sourceSpecFor('postgres').tables.find((item) => item.name === table);
+    const order = primaryKey ?? catalogTable?.primary_key ?? [];
+    if (!Array.isArray(order) || order.some((column) => !catalogTable?.primary_key.includes(column))) throw refusal('RMIG-E-BUNDLE-INTEGRITY', 'The requested table order is not its exact primary key.', { table });
+    const orderBy = order.length === 0 ? '' : ` ORDER BY ${order.map(quoteIdentifier).join(', ')}`;
+    const result = await this.#query(`SELECT * FROM ${quoteIdentifier(table)}${orderBy}`);
     for (const row of result.rows) yield row;
   }
 

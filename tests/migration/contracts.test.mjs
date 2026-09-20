@@ -147,6 +147,17 @@ describe('closed versioned artifact contracts', () => {
     expect(() => validateManifest(value)).toThrow(/safe relative POSIX path/i);
   });
 
+  it('requires safe deterministic member ordering and mode-specific member names', () => {
+    const value = manifest();
+    value.members.push({ ...value.members[0], name: 'data/z.ndjson.enc' });
+    expect(() => validateManifest(value)).not.toThrow();
+    const reordered = manifest({ members: [{ ...manifest().members[0], name: 'data/z.ndjson.enc' }, manifest().members[0]] });
+    expect(() => validateManifest(reordered)).toThrow(/order|sorted/i);
+    const plaintext = manifest({ bundle_mode: 'plaintext', plaintext_acknowledgements: { allow_plaintext_bundle: true, acknowledge_plaintext_risk: true }, members: [{ ...manifest().members[0], name: 'data/entities.ndjson' }] });
+    expect(validateManifest(plaintext)).toEqual(plaintext);
+    const wrongSuffix = manifest({ members: [{ ...manifest().members[0], name: 'data/entities.ndjson' }] });
+    expect(() => validateManifest(wrongSuffix)).toThrow(/encrypted|suffix|member/i);
+  });
   it('rejects Windows-case collisions between manifest member paths', () => {
     const value = manifest();
     value.members.push({ ...value.members[0], name: 'DATA/ENTITIES.NDJSON.ENC' });

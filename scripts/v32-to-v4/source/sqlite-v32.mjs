@@ -36,6 +36,11 @@ function quotePragmaName(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
 
+function quoteIdentifier(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(value)) throw new TypeError('SQLite identifier is not allowlisted.');
+  return `"${value}"`;
+}
+
 function buildCatalog(db) {
   const tableRows = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all();
   const tables = tableRows.map(({ name }) => {
@@ -92,10 +97,14 @@ export class SqliteV32Adapter {
     catch (error) { throw refusal('RMIG-E-SOURCE-DRIFT', 'SQLite source snapshot could not be started.', { reason: String(error?.code ?? 'begin-failed') }); }
   }
 
-  async *streamTable(table) {
+  async *streamTable(table, primaryKey = undefined) {
     const allowed = this.#allowAnyTables ? new Set(this.catalog().tables.map(({ name }) => name)) : SQLITE_TABLES;
     if (!allowed.has(table)) throw refusal('RMIG-E-SOURCE-FINGERPRINT', 'The requested table is not in the exact post-0003 SQLite catalog.', { table });
-    for (const row of this.#db.prepare(`SELECT * FROM "${table}"`).iterate()) yield row;
+    const catalogTable = this.catalog().tables.find((item) => item.name === table);
+    const order = primaryKey ?? catalogTable?.primary_key ?? [];
+    if (!Array.isArray(order) || order.some((column) => !catalogTable?.primary_key.includes(column))) throw refusal('RMIG-E-BUNDLE-INTEGRITY', 'The requested table order is not its exact primary key.', { table });
+    const orderBy = order.length === 0 ? '' : ` ORDER BY ${order.map(quoteIdentifier).join(', ')}`;
+    for (const row of this.#db.prepare(`SELECT * FROM ${quoteIdentifier(table)}${orderBy}`).iterate()) yield row;
   }
 
   rowCount(table) {

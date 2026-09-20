@@ -213,18 +213,32 @@ export function validateManifest(value) {
   const memberCount = assertDensePlainArray(fields.members, 'members');
   const names = new Set();
   const windowsFoldedNames = new Map();
+  let previousName = null;
   for (let index = 0; index < memberCount; index += 1) {
     const descriptor = Object.getOwnPropertyDescriptor(fields.members, String(index));
     const name = assertMember(descriptor.value, index);
+    if (name === 'manifest.json' || name === 'checksums.sha256') {
+      fail(`members[${index}].name`, 'must not reserve bundle control-file names');
+    }
+    if (fields.bundle_mode === 'encrypted' && !name.toLowerCase().endsWith('.enc')) {
+      fail(`members[${index}].name`, 'must end with .enc for encrypted bundles');
+    }
+    if (fields.bundle_mode === 'plaintext' && name.toLowerCase().endsWith('.enc')) {
+      fail(`members[${index}].name`, 'must not end with .enc for plaintext bundles');
+    }
     if (names.has(name)) {
       fail('members', `must not contain duplicate path ${name}`);
     }
-    names.add(name);
     const windowsFoldedName = name.toLowerCase();
     const caseCollision = windowsFoldedNames.get(windowsFoldedName);
     if (caseCollision !== undefined) {
       fail('members', `must not contain Windows-case collision ${caseCollision} and ${name}`);
     }
+    if (previousName !== null && previousName > name) {
+      fail('members', 'must be in deterministic sorted path order');
+    }
+    previousName = name;
+    names.add(name);
     windowsFoldedNames.set(windowsFoldedName, name);
   }
   return value;
