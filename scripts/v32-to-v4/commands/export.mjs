@@ -1,0 +1,64 @@
+import { readFileSync } from 'node:fs';
+import { createBundle } from '../lib/bundle.mjs';
+import { MigrationRefusal } from '../lib/refusal.mjs';
+
+const VERSION = '4.0.1';
+
+function refusal(summary) {
+  return new MigrationRefusal({ code: 'RMIG-E-SOURCE-ARG', phase: 'export', summary, safe_details: {}, report_path: null });
+}
+
+function parseFlags(argv, allowed) {
+  const result = Object.create(null);
+  for (let index = 0; index < argv.length; index += 1) {
+    const key = argv[index];
+    if (!allowed.has(key)) throw refusal('export accepts only documented options; pass --help for usage.');
+    if (key === '--allow-plaintext-bundle' || key === '--acknowledge-plaintext-risk' || key === '--plaintext') {
+      result[key] = true;
+      continue;
+    }
+    const value = argv[index + 1];
+    if (typeof value !== 'string' || value.startsWith('--')) throw refusal(`export requires a value for ${key}.`);
+    result[key] = value;
+    index += 1;
+  }
+  return result;
+}
+
+export function parseExportArgs(argv) {
+  const values = parseFlags(argv, new Set([
+    '--source-kind', '--source', '--source-report', '--source-fingerprint', '--migration-id', '--output', '--tables',
+    '--allow-plaintext-bundle', '--acknowledge-plaintext-risk', '--plaintext',
+  ]));
+  const required = ['--source-kind', '--source', '--migration-id', '--output'];
+  if (required.some((key) => typeof values[key] !== 'string')) throw refusal('export requires --source-kind, --source, --migration-id, and --output.');
+  const sourceReport = values['--source-report'] === undefined ? undefined : JSON.parse(readFileSync(values['--source-report'], 'utf8'));
+  const mode = values['--plaintext'] === true ? 'plaintext' : 'encrypted';
+  return {
+    sourceKind: values['--source-kind'], source: values['--source'], sourceReport,
+    sourceFingerprint: values['--source-fingerprint'] ?? sourceReport?.details?.actual_fingerprint,
+    migrationId: values['--migration-id'], outputPath: values['--output'],
+    tables: values['--tables']?.split(',').filter(Boolean), mode,
+    allowPlaintextBundle: values['--allow-plaintext-bundle'] === true,
+    acknowledgePlaintextRisk: values['--acknowledge-plaintext-risk'] === true,
+  };
+}
+
+async function adapterFor(sourceKind, source) {
+  if (sourceKind === 'postgres') return (await import('../source/postgres-v32.mjs')).createPostgresV32Adapter({ source });
+  if (sourceKind === 'sqlite') return (await import('../source/sqlite-v32.mjs')).createSqliteV32Adapter({ source });
+  if (sourceKind === 'd1-export') return (await import('../source/d1-export.mjs')).createD1ExportAdapter({ source });
+  throw refusal('export requires a supported source kind.');
+}
+
+export async function exportCommand(args) {
+  const adapter = await adapterFor(args.sourceKind, args.source);
+  const result = await createBundle({ ...args, adapter, migratorVersion: VERSION });
+  return result;
+}
+
+export function humanExportResult(result) {
+  return `export: complete; path=${result.path}; members=${result.manifest.members.length}\n`;
+}
+
+export { adapterFor };

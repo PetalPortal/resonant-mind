@@ -4,6 +4,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { assertNodeVersion } from './lib/runtime.mjs';
 import { humanInspectReport, inspectSource, parseInspectSourceArgs } from './commands/inspect-source.mjs';
+import { exportCommand, humanExportResult, parseExportArgs } from './commands/export.mjs';
+import { humanVerifyResult, parseVerifyBundleArgs, verifyBundleCommand } from './commands/verify-bundle.mjs';
 import { canonicalJson } from './lib/canonical-json.mjs';
 import {
   exitCodeFor,
@@ -63,6 +65,22 @@ export function main({
     }
 
     if (runCommand !== undefined) return runCommand(command, commandArgs);
+    if (command === 'export') {
+      const parsed = parseExportArgs(commandArgs);
+      return exportCommand(parsed).then((result) => {
+        if (json) writeStdout(`${canonicalJson(result.manifest)}\n`);
+        else writeStdout(humanExportResult(result));
+        return 0;
+      });
+    }
+    if (command === 'verify-bundle') {
+      const parsed = parseVerifyBundleArgs(commandArgs);
+      return Promise.resolve(verifyBundleCommand(parsed)).then((result) => {
+        if (json) writeStdout(`${canonicalJson(result.manifest)}\n`);
+        else writeStdout(humanVerifyResult(result));
+        return 0;
+      });
+    }
     if (command !== 'inspect-source') {
       throw new MigrationRefusal({
         code: 'RMIG-E-COMMAND-NOT-IMPLEMENTED',
