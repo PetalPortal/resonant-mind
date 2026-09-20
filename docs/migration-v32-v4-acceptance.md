@@ -24,21 +24,21 @@ This is a local operator-assisted acceptance record for the release-candidate im
 
 ## Local evidence
 
-The following commands were run in `C:\AI\resonant-mind-luna-finish-code` with the committed lockfile and Node 22:
+The following gates were run in the canonical checkout `C:\Users\marii\Projects\resonant-mind` at `d73fb72a5f7c9c2d3425d0ad26ea157dee6e8d73`, using the committed lockfile and Node 22:
 
 | Gate | Local result |
 |---|---|
 | `npm ci` | PASS; 135 packages installed, audit reported 0 vulnerabilities |
 | `npm run verify:v32-fixtures` | PASS; four provenance/tag matches above |
-| focused blocker suite (five files) | PASS; 5 files, 42 tests |
-| `npx vitest run tests/migration/e2e-sqlite.integration.test.mjs` | PASS; 1 test; encrypted bundle, source hash stability, reviewed policy, transform, dry-run/import receipt helpers, missing external refusal, validation status, and cleanup exercised |
-| `npm run test:migration -- --reporter=dot` | PASS; 24 files, 260 passed, 2 skipped |
-| `npm run test:migration:postgres` | PASS; 1 file passed/1 skipped, 2 tests passed/2 skipped. The live PostgreSQL E2E was skipped because `TEST_ADMIN_DATABASE_URL` was absent; this is not live PostgreSQL evidence. |
-| `npm run test:postgres` | PASS; 1 file and 3 tests skipped because `TEST_DATABASE_URL` was absent; not treated as passed live coverage |
-| `npm run verify` | PASS; typecheck, 41 files passed/2 skipped, 387 tests passed/5 skipped, release scan clean (255 files), audit found 0 vulnerabilities |
+| focused blocker suite (five files) | PASS before integration and on three consecutive reruns; 5 files, 42 tests |
+| SQLite/D1 E2E (collected by the full and migration suites) | PASS; encrypted bundle, source hash stability, reviewed policy, transform, dry-run/import receipt helpers, missing external refusal, validation status, and cleanup exercised |
+| `npm run test:migration` | PASS; 25 files passed/1 skipped, 266 tests passed/2 skipped |
+| `npm run test:migration:postgres` | PASS collection; 1 file passed/1 skipped, 2 tests passed/2 skipped. The live PostgreSQL E2E was skipped because `TEST_ADMIN_DATABASE_URL` was absent; this is not live PostgreSQL evidence. |
+| `npm run verify` | PASS; typecheck, 42 files passed/2 skipped, 393 tests passed/5 skipped, release scan clean (258 files), audit found 0 vulnerabilities |
+| `git diff --exit-code 9a08410b538f9dc56119ee34e8de044aef867e51 -- migrations/postgres` | PASS; released v4.0.1 migration SQL is unchanged. The exact release commit was used because this clone has no local `v4.0.1` tag. |
 | `npx wrangler deploy --dry-run` | PASS; 1537.08 KiB upload / 263.14 KiB gzip; dry-run exited without deployment |
 | `git diff --check` | PASS |
-| secret scan / `npm run scan:release` | PASS; release scan clean (255 files) |
+| secret scan / `npm run scan:release` | PASS; release scan clean (258 files) |
 
 The synthetic SQLite/D1 E2E intentionally proves missing external phases refuse readiness before constructing complete synthetic receipts. It does not prove live PostgreSQL behavior.
 
