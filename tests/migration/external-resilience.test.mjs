@@ -6,10 +6,12 @@ import { FilesystemObjectStore, copyImagePlan, buildFilesystemInventory } from '
 import { buildImageInventory } from '../../scripts/v32-to-v4/external/images.mjs';
 import { buildReembedPlan } from '../../scripts/v32-to-v4/external/reembed.mjs';
 import { validateReembedReceipts } from '../../scripts/v32-to-v4/external/receipt.mjs';
+import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
 import { appendCheckpoint, readCheckpointChain, maybeInjectCheckpointFault } from '../../scripts/v32-to-v4/lib/checkpoints.mjs';
 import { reconcileMigration, determineMigrationStatus } from '../../scripts/v32-to-v4/validate/reconcile.mjs';
 
 const sha = (value) => /^[0-9a-f]{64}$/.test(value);
+const SHA = 'a'.repeat(64);
 
 function tempRoot() { return mkdtempSync(join(tmpdir(), 'rmig-')); }
 
@@ -20,9 +22,10 @@ describe('external image inventory and receipts', () => {
     const store = new FilesystemObjectStore(source);
     const inventory = await store.inventory();
     expect(inventory).toHaveLength(1); expect(inventory[0]).toMatchObject({ key: 'nested/a.png', size: 4, mime: 'image/png' }); expect(sha(inventory[0].sha256)).toBe(true);
-    const receipt = await copyImagePlan({ plan: { entries: inventory.map((item) => ({ source_logical_path: item.key, target_key: `images/${item.sha256}.png`, expected_sha256: item.sha256, expected_size: item.size, expected_mime: item.mime })) }, sourceStore: store, targetStore: new FilesystemObjectStore(target) });
+    const imagePlan = buildImageInventory({ images: inventory, migrationId: 'rmig_external_01' });
+    const receipt = await copyImagePlan({ plan: imagePlan, sourceStore: store, targetStore: new FilesystemObjectStore(target) });
     expect(receipt.status).toBe('complete'); expect(receipt.entries[0].verified).toBe(true);
-    expect(readFileSync(join(target, 'images', `${inventory[0].sha256}.png`))).toEqual(Buffer.from([137, 80, 78, 71]));
+    expect(readFileSync(join(target, ...receipt.entries[0].target_key.split('/')))).toEqual(Buffer.from([137, 80, 78, 71]));
   });
 
   it('refuses source traversal and symlink escapes', async () => {
@@ -35,14 +38,14 @@ describe('external image inventory and receipts', () => {
 
 describe('re-embedding receipts', () => {
   it('is deterministic and rejects incomplete or changed jobs', () => {
-    const args = { migrationId: 'rmig_reembed_01', members: { observations: [{ id: 1, content: 'hello' }] }, images: [{ target_key: 'images/x', source_logical_path: 'x.png' }] };
+    const args = { migrationId: 'rmig_reembed_01', members: { observations: [{ id: 1, content: 'hello' }] }, images: [{ target_key: 'images/x', source_logical_path: 'x.png', expected_sha256: SHA, expected_size: 8, expected_mime: 'image/png' }] };
     const left = buildReembedPlan(args); const right = buildReembedPlan(args);
     expect(left).toEqual(right); expect(left.legacy_vectors_imported).toBe(false); expect(left.jobs).toHaveLength(2);
     const job = left.jobs[0];
-    expect(() => validateReembedReceipts({ plan: left, receipts: [{ job_id: job.job_id, status: 'partial' }] })).toThrowError(expect.objectContaining({ code: 'RMIG-E-REEMBED-INCOMPLETE' }));
-    expect(() => validateReembedReceipts({ plan: left, targetRows: { [`${job.target_locator.table}:${job.target_locator.id}`]: { id: job.target_locator.id, content: 'changed' } }, receipts: [{ job_id: job.job_id, status: 'complete', model: 'test-model', dimension: 3, content_hash: job.content_hash }] })).toThrowError(expect.objectContaining({ code: 'RMIG-E-REEMBED-INCOMPLETE' }));
-    const complete = left.jobs.map((item) => ({ job_id: item.job_id, status: 'complete', model: 'test-model', dimension: 3, content_hash: item.content_hash }));
-    expect(validateReembedReceipts({ plan: left, receipts: complete, expectedModel: 'test-model', expectedDimension: 3 })).toMatchObject({ complete: true, status: 'complete' });
+    expect(() => validateReembedReceipts({ plan: left, receipts: { format_version: 1, migration_id: left.migration_id, plan_sha256: left.plan_sha256, receipts: [{ job_id: job.job_id, status: 'partial' }] } })).toThrowError(expect.objectContaining({ code: 'RMIG-E-REEMBED-INCOMPLETE' }));
+    expect(() => validateReembedReceipts({ plan: left, targetRows: { [`${job.target_locator.table}:${job.target_locator.id}`]: { id: job.target_locator.id, content: 'changed' } }, receipts: { format_version: 1, migration_id: left.migration_id, plan_sha256: left.plan_sha256, receipts: [{ job_id: job.job_id, target_locator: job.target_locator, migration_id: left.migration_id, plan_sha256: left.plan_sha256, status: 'complete', model: 'test-model', dimension: 3, content_hash: job.content_hash }] } })).toThrowError(expect.objectContaining({ code: 'RMIG-E-REEMBED-INCOMPLETE' }));
+    const complete = left.jobs.map((item) => ({ job_id: item.job_id, migration_id: left.migration_id, plan_sha256: left.plan_sha256, target_locator: item.target_locator, ...(item.modality === 'image' ? { source_logical_path: item.source_logical_path, target_key: item.target_key, ...(item.object_sha256 === undefined ? {} : { object_sha256: item.object_sha256, source_sha256: item.object_sha256 }), ...(item.object_size === undefined ? {} : { object_size: item.object_size }), ...(item.object_mime === undefined ? {} : { object_mime: item.object_mime }) } : {}), status: 'complete', model: 'test-model', dimension: 3, content_hash: item.content_hash }));
+    expect(validateReembedReceipts({ plan: left, receipts: { format_version: 1, migration_id: left.migration_id, plan_sha256: left.plan_sha256, receipts: complete }, expectedModel: 'test-model', expectedDimension: 3 })).toMatchObject({ complete: true, status: 'complete' });
   });
 });
 
@@ -66,7 +69,13 @@ describe('append-only checkpoints and final reconciliation', () => {
   });
 
   it('reports readiness only when relational and external receipts reconcile', () => {
-    const report = reconcileMigration({ source: { observations: [{ id: 1, content: 'x' }] }, target: { observations: [{ id: 1, content: 'x' }] }, imagePlan: { entries: [] }, reembedPlan: { jobs: [] }, reembedReceipts: [] });
+    const imagePlan = buildImageInventory({ images: [], migrationId: 'rmig_reconcile_01' });
+    const imageReceipt = { format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: imagePlan.migration_id, plan_sha256: imagePlan.plan_sha256, entries: [] };
+    imageReceipt.receipt_sha256 = canonicalSha256(imageReceipt);
+    const reembedPlan = buildReembedPlan({ members: {}, migrationId: 'rmig_reconcile_01' });
+    const reembedReceipts = { format_version: 1, migration_id: reembedPlan.migration_id, plan_sha256: reembedPlan.plan_sha256, receipts: [] };
+    const rowset = { observations: [{ id: 1, content: 'x' }] };
+    const report = reconcileMigration({ source: rowset, exported: rowset, staged: rowset, target: rowset, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt: { status: 'validated', receipt_sha256: 'a'.repeat(64) }, importReceipt: { status: 'complete', receipt_sha256: 'b'.repeat(64) } });
     expect(report.status).toBe('ready-for-cutover'); expect(determineMigrationStatus(report)).toBe('ready-for-cutover');
   });
 });

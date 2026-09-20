@@ -9,6 +9,7 @@ import { humanVerifyResult, parseVerifyBundleArgs, verifyBundleCommand } from '.
 import {
   appendCheckpoint,
   maybeInjectCheckpointFault,
+  resumeFromCheckpoints,
 } from './lib/checkpoints.mjs';
 import { canonicalJson } from './lib/canonical-json.mjs';
 import { compilePolicyCommand, humanCompilePolicyResult, parseCompilePolicyArgs } from './commands/compile-policy.mjs';
@@ -66,7 +67,18 @@ function stripCheckpointOptions(argv) {
   return { clean, values };
 }
 function recordCheckpoint(result, name, options) {
-  if (!options.checkpointDir) return result; const migrationId = options.checkpointMigrationId ?? result.migration_id; const artifact = options.checkpointArtifactSha256 ?? result.artifact_sha256 ?? result.receipt_sha256 ?? result.plan_sha256 ?? result.report_sha256; if (typeof migrationId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/u.test(migrationId) || typeof artifact !== 'string' || !/^[0-9a-f]{64}$/u.test(artifact)) throw new MigrationRefusal({ code: 'RMIG-E-CHECKPOINT', phase: 'runtime', summary: 'Checkpoint options must bind a migration ID and artifact SHA-256.', safe_details: {}, report_path: null }); appendCheckpoint(options.checkpointDir, { name, migration_id: migrationId, artifact_sha256: artifact, details: { command: name } }); maybeInjectCheckpointFault(name); return result;
+  if (!options.checkpointDir) return result; const migrationId = options.checkpointMigrationId ?? result.migration_id; const artifact = options.checkpointArtifactSha256 ?? result.artifact_sha256 ?? result.receipt_sha256 ?? result.plan_sha256 ?? result.report_sha256; if (typeof migrationId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$/u.test(migrationId) || typeof artifact !== 'string' || !/^[0-9a-f]{64}$/u.test(artifact)) throw new MigrationRefusal({ code: 'RMIG-E-CHECKPOINT', phase: 'runtime', summary: 'Checkpoint options must bind a migration ID and artifact SHA-256.', safe_details: {}, report_path: null }); appendCheckpoint(options.checkpointDir, { name, migration_id: migrationId, artifact_sha256: artifact, details: { command: name, ...(typeof result.schema === 'string' ? { schema: result.schema } : {}), ...(typeof result.report_path === 'string' ? { report_path: result.report_path } : {}) } }); maybeInjectCheckpointFault(name); return result;
+}
+
+function applyCheckpointInputs(command, args, checkpoint) {
+  if (!checkpoint?.details) return args;
+  const output = [...args];
+  const has = (flag) => output.includes(flag);
+  if (command === 'prepare-target' && checkpoint.details.schema && !has('--resume-schema')) output.push('--resume-schema', checkpoint.details.schema);
+  if (command === 'dry-run' && checkpoint.details.schema && !has('--staging-schema')) output.push('--staging-schema', checkpoint.details.schema);
+  if (command === 'import' && checkpoint.details.schema && !has('--staging-schema')) output.push('--staging-schema', checkpoint.details.schema);
+  if (command === 'import' && checkpoint.details.report_path && !has('--dry-run')) output.push('--dry-run', checkpoint.details.report_path);
+  return output;
 }
 
 export function main({
@@ -98,6 +110,13 @@ export function main({
     }
 
     const { clean: commandArgs, values: checkpointOptions } = stripCheckpointOptions(rawCommandArgs);
+    let checkpoint;
+    if (checkpointOptions.checkpointDir) {
+      checkpoint = resumeFromCheckpoints(checkpointOptions.checkpointDir, {
+        migration_id: checkpointOptions.checkpointMigrationId,
+        artifact_sha256: checkpointOptions.checkpointArtifactSha256,
+      });
+    }
     maybeInjectCheckpointFault('__command-start__');
     if (runCommand !== undefined) return runCommand(command, commandArgs);
     if (command === 'export') {
@@ -125,7 +144,7 @@ export function main({
       return 0;
     }
     if (['inspect-target', 'prepare-target', 'dry-run', 'import'].includes(command)) {
-      return targetCommand(command, commandArgs).then((result) => {
+      return targetCommand(command, applyCheckpointInputs(command, commandArgs, checkpoint)).then((result) => {
         const checkpointName = command === 'prepare-target' ? 'target-prepared' : command === 'dry-run' ? 'dry-run-accepted' : command === 'import' ? 'import-committed' : 'source-inspected';
         const checked = recordCheckpoint(result, checkpointName, checkpointOptions);
         writeStdout(json ? `${canonicalJson(checked)}\n` : humanTargetResult(checked));
