@@ -18,7 +18,9 @@
     "scan:release": "node scripts/scan-release.mjs",
     "db:migrate": "node scripts/migrate-postgres.mjs",
     "migrate:v32": "node scripts/v32-to-v4/cli.mjs",
-    "verify": "npm run typecheck && npm test && npm run scan:release && npm audit --audit-level=moderate"
+    "verify:v32-fixtures": "node scripts/verify-v32-fixtures.mjs",
+    "test:migration:postgres": "vitest run tests/migration/postgres-source.integration.test.mjs tests/migration/e2e-postgres.integration.test.mjs",
+    "verify": "npm run verify:v32-fixtures && npm run typecheck && npm test && npm run scan:release && npm audit --audit-level=moderate"
   },
   "dependencies": {
     "@google/genai": "2.11.0",
