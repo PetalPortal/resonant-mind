@@ -8,6 +8,7 @@ import { exportCommand, humanExportResult, parseExportArgs } from './commands/ex
 import { humanVerifyResult, parseVerifyBundleArgs, verifyBundleCommand } from './commands/verify-bundle.mjs';
 import { canonicalJson } from './lib/canonical-json.mjs';
 import { compilePolicyCommand, humanCompilePolicyResult, parseCompilePolicyArgs } from './commands/compile-policy.mjs';
+import { targetCommand, humanTargetResult } from './commands/target.mjs';
 import {
   exitCodeFor,
   isMigrationRefusal,
@@ -100,6 +101,12 @@ export function main({
       const result = compilePolicyCommand(parsed);
       writeStdout(json ? `${canonicalJson(result)}\n` : humanCompilePolicyResult(result));
       return 0;
+    }
+    if (['inspect-target', 'prepare-target', 'dry-run', 'import'].includes(command)) {
+      return targetCommand(command, commandArgs).then((result) => {
+        writeStdout(json ? `${canonicalJson(result)}\n` : humanTargetResult(result));
+        return 0;
+      });
     }
     if (command !== 'inspect-source') {
       throw new MigrationRefusal({
