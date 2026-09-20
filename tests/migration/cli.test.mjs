@@ -26,6 +26,8 @@ Commands:
   plan-reembed
   validate
   status
+
+Interrupted pre-commit runs are not auto-resumed; restart against a fresh target.
 `;
 
 function spawnCli(args) {
@@ -94,6 +96,13 @@ describe('v3.2 to v4 migration CLI', () => {
     expect(result.stdout).toBe(
       '{"code":"RMIG-E-COMMAND-UNKNOWN","phase":"runtime","remediation":"Run with --help and choose one listed migration command.","report_path":null,"safe_details":{},"summary":"Unknown migration command. Run with --help to list commands."}\n',
     );
+  });
+
+  it('refuses checkpoint resume options and documents fresh-target restart semantics', () => {
+    const result = spawnCli(['status', '--checkpoint-dir', 'partial']);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('RMIG-E-CHECKPOINT: Checkpoint/resume is not a supported success path.');
+    expect(result.stderr).toContain('fresh target');
   });
 
   it('refuses inspect-source arguments before opening a source', () => {

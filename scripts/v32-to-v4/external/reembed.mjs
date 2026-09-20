@@ -38,22 +38,25 @@ export function validateReembedReceipts({ plan, receipts, targetRows, expectedMo
   const envelope = Array.isArray(receipts) ? {} : receipts ?? {}; const rows = receiptRows(receipts); if (envelope.format_version !== FORMAT_VERSION || !Array.isArray(envelope.receipts)) throw refuse('Re-embedding receipts require a versioned envelope, not a weak JSON list.');
   if (envelope.migration_id !== migrationId) throw refuse('Re-embedding receipt migration identity does not match the requested migration.');
   if (envelope.plan_sha256 !== plan.plan_sha256) throw refuse('Re-embedding receipts are not bound to the exact job plan.');
-  if (bundleManifestSha256 !== undefined && envelope.bundle_manifest_sha256 !== undefined && envelope.bundle_manifest_sha256 !== bundleManifestSha256) throw refuse('Re-embedding bundle binding does not match the job plan.');
-  if (compiledPolicySha256 !== undefined && envelope.compiled_policy_sha256 !== undefined && envelope.compiled_policy_sha256 !== compiledPolicySha256) throw refuse('Re-embedding policy binding does not match the job plan.');
+  if (plan.bundle_manifest_sha256 !== undefined && envelope.bundle_manifest_sha256 !== plan.bundle_manifest_sha256) throw refuse('Re-embedding receipts are not bound to the exact bundle manifest.');
+  if (plan.compiled_policy_sha256 !== undefined && envelope.compiled_policy_sha256 !== plan.compiled_policy_sha256) throw refuse('Re-embedding receipts are not bound to the exact compiled policy.');
   if (rows.length !== plan.jobs.length) throw refuse('Re-embedding receipts do not contain the complete job set.', { expected: plan.jobs.length, received: rows.length });
   const byId = new Map(); for (const receipt of rows) { if (!receipt || typeof receipt.job_id !== 'string' || byId.has(receipt.job_id)) throw refuse('Re-embedding receipts contain a duplicate job receipt.'); byId.set(receipt.job_id, receipt); }
-  const problems = []; const completed = [];
+  const problems = []; const completed = []; let receiptModel; let receiptDimension;
   for (const job of plan.jobs) {
     const receipt = byId.get(job.job_id); if (!receipt) { problems.push({ job_id: job.job_id, reason: 'missing' }); continue; }
     if (receipt.migration_id !== job.migration_id) problems.push({ job_id: job.job_id, reason: 'migration-mismatch' });
     if (receipt.plan_sha256 !== plan.plan_sha256) problems.push({ job_id: job.job_id, reason: 'plan-mismatch' });
+    if (plan.bundle_manifest_sha256 !== undefined && receipt.bundle_manifest_sha256 !== plan.bundle_manifest_sha256) problems.push({ job_id: job.job_id, reason: 'bundle-mismatch' });
+    if (plan.compiled_policy_sha256 !== undefined && receipt.compiled_policy_sha256 !== plan.compiled_policy_sha256) problems.push({ job_id: job.job_id, reason: 'policy-mismatch' });
     if (receipt.status !== 'complete' || !exactLocator(receipt.target_locator, job.target_locator)) { problems.push({ job_id: job.job_id, reason: 'status-or-target-locator' }); continue; }
     if (receipt.content_hash !== job.content_hash) problems.push({ job_id: job.job_id, reason: 'content-hash-mismatch' });
     if (job.modality === 'image') {
       if (!job.object_sha256 || !Number.isSafeInteger(Number(job.object_size)) || typeof job.object_mime !== 'string' || receipt.source_logical_path !== job.source_logical_path || receipt.target_key !== job.target_key || receipt.object_sha256 !== job.object_sha256 || receipt.object_sha256 !== receipt.source_sha256 || Number(receipt.object_size) !== Number(job.object_size) || receipt.object_mime !== job.object_mime) problems.push({ job_id: job.job_id, reason: 'object-binding-mismatch' });
     }
     const model = receipt.model ?? receipt.model_id; const dimension = receipt.dimension ?? receipt.vector_dimension;
-    if (typeof model !== 'string' || model.length === 0) problems.push({ job_id: job.job_id, reason: 'model-missing' }); if (!Number.isSafeInteger(dimension) || dimension < 1) problems.push({ job_id: job.job_id, reason: 'dimension-missing' });
+    if (typeof model !== 'string' || model.length === 0) problems.push({ job_id: job.job_id, reason: 'model-missing' }); else if (receiptModel === undefined) receiptModel = model; else if (receiptModel !== model) problems.push({ job_id: job.job_id, reason: 'model-inconsistent' });
+    if (!Number.isSafeInteger(dimension) || dimension < 1) problems.push({ job_id: job.job_id, reason: 'dimension-missing' }); else if (receiptDimension === undefined) receiptDimension = dimension; else if (receiptDimension !== dimension) problems.push({ job_id: job.job_id, reason: 'dimension-inconsistent' });
     if (expectedModel !== undefined && model !== expectedModel) problems.push({ job_id: job.job_id, reason: 'model-mismatch' }); if (expectedDimension !== undefined && dimension !== expectedDimension) problems.push({ job_id: job.job_id, reason: 'dimension-mismatch' });
     const targetHash = targetHashFor(job, targetRows); if (targetRows && targetHash !== job.content_hash) problems.push({ job_id: job.job_id, reason: targetHash === null ? 'target-row-missing' : 'target-content-changed' });
     completed.push(job.job_id);

@@ -9,6 +9,7 @@ import { validateReembedReceipts } from '../../scripts/v32-to-v4/external/receip
 import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
 import { appendCheckpoint, readCheckpointChain, maybeInjectCheckpointFault } from '../../scripts/v32-to-v4/lib/checkpoints.mjs';
 import { reconcileMigration, determineMigrationStatus } from '../../scripts/v32-to-v4/validate/reconcile.mjs';
+import { buildDryRunReport, buildImportReceipt } from '../../scripts/v32-to-v4/target/postgres.mjs';
 
 const sha = (value) => /^[0-9a-f]{64}$/.test(value);
 const SHA = 'a'.repeat(64);
@@ -53,9 +54,10 @@ describe('append-only checkpoints and final reconciliation', () => {
   it('chains checkpoints, resumes idempotently, and rejects tampering', () => {
     const dir = tempRoot();
     appendCheckpoint(dir, { name: 'source-inspected', migration_id: 'rmig_resume_01', artifact_sha256: 'a'.repeat(64), details: { count: 1 } });
-    appendCheckpoint(dir, { name: 'source-inspected', migration_id: 'rmig_resume_01', artifact_sha256: 'a'.repeat(64), details: { count: 1 } });
+    appendCheckpoint(dir, { name: 'bundle-member:data/entities.ndjson', migration_id: 'rmig_resume_01', artifact_sha256: 'a'.repeat(64), details: {} });
+    appendCheckpoint(dir, { name: 'bundle-finalized', migration_id: 'rmig_resume_01', artifact_sha256: 'a'.repeat(64), details: {} });
     appendCheckpoint(dir, { name: 'policy-compiled', migration_id: 'rmig_resume_01', artifact_sha256: 'a'.repeat(64), details: {} });
-    expect(readCheckpointChain(dir)).toHaveLength(2);
+    expect(readCheckpointChain(dir)).toHaveLength(4);
     writeFileSync(join(dir, '000001.json'), readFileSync(join(dir, '000001.json'), 'utf8').replace('source-inspected', 'tampered'));
     expect(() => readCheckpointChain(dir)).toThrowError(expect.objectContaining({ code: 'RMIG-E-CHECKPOINT' }));
   });
@@ -75,7 +77,11 @@ describe('append-only checkpoints and final reconciliation', () => {
     const reembedPlan = buildReembedPlan({ members: {}, migrationId: 'rmig_reconcile_01' });
     const reembedReceipts = { format_version: 1, migration_id: reembedPlan.migration_id, plan_sha256: reembedPlan.plan_sha256, receipts: [] };
     const rowset = { observations: [{ id: 1, content: 'x' }] };
-    const report = reconcileMigration({ source: rowset, exported: rowset, staged: rowset, target: rowset, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt: { status: 'validated', receipt_sha256: 'a'.repeat(64) }, importReceipt: { status: 'complete', receipt_sha256: 'b'.repeat(64) } });
+    const plan = { migration_id: imagePlan.migration_id, bundle_manifest_sha256: SHA, compiled_policy_sha256: 'b'.repeat(64), members: {}, coverage: {}, losses: [] };
+    const targetIdentity = { database_identity_sha256: 'd'.repeat(64) };
+    const dryRunReceipt = buildDryRunReport({ plan, targetIdentity, migrationSetSha256: '1'.repeat(64), migratorVersion: '4.0.1', stageContentSha256: canonicalSha256({}), targetStateSha256: canonicalSha256({}) });
+    const importReceipt = buildImportReceipt({ plan, dryRun: dryRunReceipt, targetIdentity, insertedRows: 0 });
+    const report = reconcileMigration({ source: { ...rowset, migration_id: imagePlan.migration_id }, exported: rowset, staged: rowset, target: rowset, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt });
     expect(report.status).toBe('ready-for-cutover'); expect(determineMigrationStatus(report)).toBe('ready-for-cutover');
   });
 });

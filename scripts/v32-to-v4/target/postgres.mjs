@@ -278,8 +278,16 @@ export function buildDryRunReport({ plan, targetIdentity, migrationSetSha256: se
   for (const table of Object.keys(members).sort()) { const coverage = plan.coverage?.[table] ?? {}; counts.tables[table] = { source_rows: coverage.source_rows ?? members[table].length, transformed_rows: coverage.transformed_rows ?? coverage.mapped_rows ?? members[table].length, excluded_rows: coverage.excluded_rows ?? 0, rows: members[table].length, sha256: canonicalSha256(members[table]) }; }
   const losses = Array.isArray(plan.losses) ? plan.losses : [];
   const boundHash = setHash && migratorVersion ? boundPlanSha256(plan, { migrationSetSha256: setHash, migratorVersion }) : (plan.plan_sha256 ?? planPayloadSha256(plan));
-  const report = { format_version: 1, report_type: 'fresh-v4-dry-run', status, migration_id: plan.migration_id, bundle_manifest_sha256: plan.bundle_manifest_sha256, compiled_policy_sha256: plan.compiled_policy_sha256, migration_set_sha256: setHash ?? plan.migration_set_sha256 ?? null, migrator_version: migratorVersion, plan_sha256: boundHash, stage_content_sha256: contentHash ?? stageContentSha256(members), target_identity_sha256: targetIdentity.database_identity_sha256, target_state_sha256: stateHash ?? null, counts, validation: validationFor(plan), losses: { count: losses.length, sha256: canonicalSha256(losses), entries: losses } };
+  const report = { format_version: 1, receipt_type: 'fresh-v4-dry-run', report_type: 'fresh-v4-dry-run', status, migration_id: plan.migration_id, bundle_manifest_sha256: plan.bundle_manifest_sha256, compiled_policy_sha256: plan.compiled_policy_sha256, migration_set_sha256: setHash ?? plan.migration_set_sha256 ?? null, migrator_version: migratorVersion, plan_sha256: boundHash, stage_content_sha256: contentHash ?? stageContentSha256(members), target_identity_sha256: targetIdentity.database_identity_sha256, target_state_sha256: stateHash ?? null, counts, validation: validationFor(plan), losses: { count: losses.length, sha256: canonicalSha256(losses), entries: losses } };
   report.receipt_sha256 = canonicalSha256(report); return Object.freeze(report);
+}
+
+export function buildImportReceipt({ plan, dryRun, targetIdentity, insertedRows = 0 } = {}) {
+  if (!plan || !dryRun || !targetIdentity?.database_identity_sha256) throw new TypeError('An import receipt requires a plan, dry-run receipt, and target identity.');
+  if (dryRun.migration_id !== plan.migration_id || dryRun.bundle_manifest_sha256 !== plan.bundle_manifest_sha256 || dryRun.compiled_policy_sha256 !== plan.compiled_policy_sha256 || dryRun.target_identity_sha256 !== targetIdentity.database_identity_sha256) throw refusal('RMIG-E-RECEIPT-MISMATCH', 'import', 'Import receipt inputs are not bound to the dry-run receipt.');
+  const receipt = { format_version: 1, receipt_type: 'fresh-v4-import', status: 'complete', migration_id: plan.migration_id, bundle_manifest_sha256: plan.bundle_manifest_sha256, compiled_policy_sha256: plan.compiled_policy_sha256, target_identity_sha256: targetIdentity.database_identity_sha256, migration_set_sha256: dryRun.migration_set_sha256, migrator_version: dryRun.migrator_version, plan_sha256: dryRun.plan_sha256, stage_content_sha256: dryRun.stage_content_sha256, target_state_sha256: dryRun.target_state_sha256, dry_run_receipt_sha256: dryRun.receipt_sha256, inserted_rows: insertedRows };
+  receipt.receipt_sha256 = canonicalSha256(receipt);
+  return Object.freeze(receipt);
 }
 
 function verifyDryRun(plan, dryRun, targetIdentity) {
@@ -415,10 +423,11 @@ export async function importPlan({ client, plan, dryRun, targetIdentity, staging
       await resetSequence(client, table);
       if (injectFailureAfter !== undefined && inserted >= injectFailureAfter) throw new Error('injected import failure for rollback proof');
     }
-    await query(client, 'INSERT INTO public.migration_import_receipts (migration_id, bundle_manifest_sha256, compiled_policy_sha256, target_identity_sha256, migration_set_sha256, migrator_version, plan_sha256, stage_content_sha256, target_state_sha256, receipt_sha256, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)', [plan.migration_id, plan.bundle_manifest_sha256, plan.compiled_policy_sha256, targetIdentity.database_identity_sha256, row.migration_set_sha256, row.migrator_version, row.plan_sha256, row.stage_content_sha256, row.target_state_sha256, dryRun.receipt_sha256, 'complete']);
+    const importReceipt = buildImportReceipt({ plan, dryRun, targetIdentity, insertedRows: inserted });
+    await query(client, 'INSERT INTO public.migration_import_receipts (migration_id, bundle_manifest_sha256, compiled_policy_sha256, target_identity_sha256, migration_set_sha256, migrator_version, plan_sha256, stage_content_sha256, target_state_sha256, receipt_sha256, status) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)', [plan.migration_id, plan.bundle_manifest_sha256, plan.compiled_policy_sha256, targetIdentity.database_identity_sha256, row.migration_set_sha256, row.migrator_version, row.plan_sha256, row.stage_content_sha256, row.target_state_sha256, importReceipt.receipt_sha256, 'complete']);
     await query(client, `UPDATE ${qtable(stagingSchema, 'run_metadata')} SET status = $1, updated_at = NOW() WHERE migration_id = $2`, ['complete', plan.migration_id]);
     await query(client, 'COMMIT');
-    return Object.freeze({ migration_id: plan.migration_id, receipt_sha256: dryRun.receipt_sha256, status: 'complete', inserted_rows: inserted });
+    return Object.freeze(importReceipt);
   } catch (error) { try { await query(client, 'ROLLBACK'); } catch { /* preserve import error */ } throw error; }
 }
 

@@ -26,6 +26,7 @@ function signedReceipt(plan) {
     format_version: 1,
     receipt_type: 'image-copy',
     status: 'complete',
+    external_handoff: true,
     migration_id: plan.migration_id,
     plan_sha256: plan.plan_sha256,
     entries: [{

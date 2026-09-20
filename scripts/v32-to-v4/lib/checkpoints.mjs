@@ -14,10 +14,22 @@ function checkpointHash(entry) { return canonicalSha256(hashInput(entry)); }
 function parseFile(path) { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { throw refuse('Checkpoint receipt is truncated or invalid JSON.'); } }
 function fileNames(dir) { try { return readdirSync(dir).filter((name) => name.endsWith('.json')).sort(); } catch { return []; } }
 function validateTransition(previous, current) {
-  if (!previous) return stateOf(current.name) === 'source-inspected' ? null : refuse('Checkpoint chain must begin with source inspection.');
-  const from = RANKS.get(stateOf(previous.name)); const to = RANKS.get(stateOf(current.name)); if (from === undefined || to === undefined || to < from) throw refuse('Checkpoint chain contains a fork or out-of-order phase.');
-  const requiredPrevious = new Map([['dry-run-accepted', 60], ['import-committed', 70], ['images-complete', 80], ['reembed-complete', 90], ['validation-complete', 100]]).get(stateOf(current.name));
-  if (requiredPrevious !== undefined && from < requiredPrevious) throw refuse('Checkpoint chain skips a required predecessor phase.');
+  const currentState = stateOf(current.name);
+  if (!previous) return currentState === 'source-inspected' ? null : refuse('Checkpoint chain must begin with source inspection.');
+  const previousState = stateOf(previous.name);
+  const allowed = {
+    'source-inspected': new Set(['bundle-member']),
+    'bundle-member': new Set(['bundle-member', 'bundle-finalized']),
+    'bundle-finalized': new Set(['policy-compiled']),
+    'policy-compiled': new Set(['target-prepared']),
+    'target-prepared': new Set(['stage-member']),
+    'stage-member': new Set(['stage-member', 'dry-run-accepted']),
+    'dry-run-accepted': new Set(['import-committed']),
+    'import-committed': new Set(['images-complete']),
+    'images-complete': new Set(['reembed-complete']),
+    'reembed-complete': new Set(['validation-complete']),
+  };
+  if (!allowed[previousState]?.has(currentState)) throw refuse('Checkpoint chain skips a required semantic phase; restart the interrupted migration from a fresh target.');
   return null;
 }
 function validateEntry(entry, index, previous, expectedIdentity) {

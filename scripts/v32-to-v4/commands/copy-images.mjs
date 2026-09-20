@@ -12,7 +12,8 @@ export async function copyImagesCommand(args) {
   const plan = json(args.plan, 'Image plan');
   if (args.adapter === 'r2') {
     if (!args.externalReceipt || !args.trustedPublicKey) throw new MigrationRefusal({ code: 'RMIG-E-IMAGE-INCOMPLETE', phase: 'copy-images', summary: 'R2 handoff requires an external receipt and a trusted public-key file; unsigned JSON is never complete.', safe_details: { adapter: 'r2' }, report_path: null });
-    const receipt = { ...json(args.externalReceipt, 'External R2 receipt'), external_handoff: true };
+    const receipt = json(args.externalReceipt, 'External R2 receipt');
+    if (receipt.external_handoff !== true) throw new MigrationRefusal({ code: 'RMIG-E-IMAGE-INCOMPLETE', phase: 'copy-images', summary: 'R2 receipts must declare an operator external handoff before signature verification.', safe_details: { adapter: 'r2' }, report_path: null });
     let publicKey; try { publicKey = readFileSync(args.trustedPublicKey, 'utf8'); } catch { throw refuse('The trusted external receipt public-key file is missing or unreadable.'); }
     validateImageReceipt({ plan, receipt, requireSignature: true, trustedPublicKey: publicKey }); write(args.receiptOut, receipt); return receipt;
   }
