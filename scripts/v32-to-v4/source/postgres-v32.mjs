@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
-import { canonicalSha256 } from '../lib/hash.mjs';
 import { redactText } from '../lib/redact.mjs';
 import { MigrationRefusal } from '../lib/refusal.mjs';
+import { postgresIdentityFromRow } from '../lib/postgres-identity.mjs';
 import { sourceSpecFor } from '../lib/fingerprint.mjs';
 import { assertSourceAdapter } from './adapter.mjs';
 
@@ -203,8 +203,7 @@ export class PostgresV32Adapter {
   async identity() {
     const result = await this.#query(POSTGRES_CATALOG_QUERIES.identity);
     const row = result.rows[0] ?? {};
-    const stable = { database_name: row.database_name ?? null, database_oid: String(row.database_oid ?? ''), server_address: row.server_address ?? null, server_port: row.server_port ?? null, server_version: row.server_version ?? null };
-    return { kind: 'postgres', source_reference: this.sourceReference, host: '[REDACTED]', port: '[REDACTED]', database: '[REDACTED]', server_identity_sha256: canonicalSha256({ server_address: stable.server_address, server_port: stable.server_port, server_version: stable.server_version }), database_identity_sha256: canonicalSha256(stable), };
+    return { ...postgresIdentityFromRow(row), source_reference: this.sourceReference };
   }
 
   async catalog() {

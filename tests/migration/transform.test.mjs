@@ -69,11 +69,11 @@ function allValues(value, callback) { callback(value); if (Array.isArray(value))
   it('matches the exhaustive final v4 column catalog and checks', () => {
     const catalog = {
       people: ['id','name','kind','salience','primary_context','created_at','updated_at'], nodes: ['id','name','kind','salience','primary_context','created_at','updated_at'],
-      observations: ['id','entity_id','person_id','node_id','content','salience','emotion','added_at','weight','updated_at','charge','charge_note','sit_count','last_sat_at','resolution_note','resolved_at','linked_observation_id','last_surfaced_at','surface_count','novelty_score','certainty','source','archived_at','source_date','context','access_count','last_accessed_at','valid_from','valid_until','superseded_by','supersedes'],
+      observations: ['id','entity_id','person_id','node_id','content','salience','emotion','added_at','weight','updated_at','charge','sit_count','last_sat_at','resolution_note','resolved_at','linked_observation_id','last_surfaced_at','surface_count','novelty_score','certainty','source','archived_at','source_date','context','access_count','last_accessed_at','valid_from','valid_until','superseded_by','supersedes','rescued_at'],
       observation_versions: ['id','observation_id','version_num','content','weight','emotion','edited_at'], relations: ['id','from_entity','to_entity','relation_type','from_context','to_context','store_in','created_at'],
       threads: ['id','thread_type','content','context','priority','status','source','notes','created_at','updated_at','resolved_at','resolution'], context_entries: ['id','scope','content','links','updated_at'], relational_state: ['id','person','feeling','intensity','timestamp'],
       identity: ['id','section','content','kind','weight','connections','timestamp','archived_at'], journals: ['id','entry_date','content','tags','emotion','journal_type','created_at'],
-      consolidation_groups: ['id','summary','entity_id','person_id','node_id','source_observation_ids','consolidated_observation_id','created_at'], images: ['id','path','description','context','emotion','weight','entity_id','person_id','node_id','observation_id','charge','created_at','last_viewed_at','view_count','novelty_score','last_surfaced_at','surface_count','archived_at'],
+      consolidation_groups: ['id','summary','entity_id','person_id','node_id','source_observation_ids','consolidated_observation_id','created_at'], images: ['id','path','description','context','emotion','weight','entity_id','person_id','node_id','observation_id','charge','created_at','last_viewed_at','view_count','novelty_score','last_surfaced_at','surface_count','access_count','last_accessed_at','archived_at'],
       subconscious: ['id','state_type','data','updated_at'], daemon_proposals: ['id','proposal_type','from_obs_id','to_obs_id','from_entity_id','to_entity_id','reason','confidence','status','proposed_at','resolved_at','co_count_at_resolution'], tensions: ['id','pole_a','pole_b','context','visits','created_at','last_visited','resolved_at','resolution'],
       orphan_observations: ['id','observation_id','first_marked','rescue_attempts','last_rescue_attempt'], co_surfacing: ['id','obs_a_id','obs_b_id','co_count','first_co_surfaced','last_co_surfaced','relation_proposed','relation_created'],
     };
@@ -84,12 +84,13 @@ function allValues(value, callback) { callback(value); if (Array.isArray(value))
   });
 
   it('matches the final v4 catalog types and maps every persisted source field', () => {
-    expect(TARGET_SCHEMAS.observations.columns).toMatchObject({ charge_note: 'text', access_count: 'integer', last_accessed_at: 'timestamptz', source_date: 'date', novelty_score: 'double' });
+    expect(TARGET_SCHEMAS.observations.columns).toMatchObject({ access_count: 'integer', last_accessed_at: 'timestamptz', source_date: 'date', novelty_score: 'double' });
     expect(TARGET_SCHEMAS.identity.columns.weight).toBe('double');
     expect(TARGET_SCHEMAS.images.columns.novelty_score).toBe('double');
     expect(TARGET_SCHEMAS.co_surfacing.columns.first_co_surfaced).toBe('timestamptz');
     const observationMap = MAP.find((item) => item.source_table === 'observations').column_map;
-    expect(observationMap).toMatchObject({ charge_note: 'charge_note', access_count: 'access_count', last_accessed_at: 'last_accessed_at' });
+    expect(observationMap).toMatchObject({ access_count: 'access_count', last_accessed_at: 'last_accessed_at' });
+    expect(MAP.find((item) => item.source_table === 'observations').dropped_fields).toEqual(expect.arrayContaining([expect.objectContaining({ field: 'charge_note' })]));
   });
 
   it('emits an exact v4-shaped golden plan for every SQLite mapping', () => {

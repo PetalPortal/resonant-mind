@@ -40,6 +40,7 @@ const PLAN = {
   bundle_manifest_sha256: 'c'.repeat(64),
   compiled_policy_sha256: 'd'.repeat(64),
   members: {
+    entities: [{ id: 1, name: 'Alice', entity_type: 'person', primary_context: 'default', salience: 'active' }],
     people: [{ id: 1, name: 'Alice', kind: 'person' }],
     observations: [{ id: 4, entity_id: 1, person_id: 1, content: 'hello' }],
   },
@@ -116,21 +117,14 @@ it('produces a receipt-bearing dry run with exact row hashes and validation buck
   expect(report.receipt_sha256).toMatch(/^[0-9a-f]{64}$/);
 });
 
-it('imports in dependency order with parameters, resets sequences, and rolls back injected failures', async () => {
-  const client = fakeClient([
-    { when: /migration_import_receipts/, result: { rows: [], rowCount: 0 } },
-  ]);
-  await expect(importPlan({ client, plan: PLAN, dryRun: buildDryRunReport({ plan: PLAN, targetIdentity: IDENTITY }), targetIdentity: IDENTITY, injectFailureAfter: 1 })).rejects.toThrow('injected');
-  expect(client.calls.some(({ text }) => text === 'ROLLBACK')).toBe(true);
-  const inserts = client.calls.filter(({ text }) => /^INSERT INTO/.test(text));
-  expect(inserts.every(({ values }) => values.length > 0)).toBe(true);
-  expect(inserts.every(({ text }) => !/Alice|hello/.test(text))).toBe(true);
+it('refuses direct plan imports before any target mutation', async () => {
+  const client = fakeClient();
+  await expect(importPlan({ client, plan: PLAN, dryRun: buildDryRunReport({ plan: PLAN, targetIdentity: IDENTITY }), targetIdentity: IDENTITY, injectFailureAfter: 1 })).rejects.toMatchObject({ code: 'RMIG-E-DRY-RUN-REQUIRED' });
+  expect(client.calls).toHaveLength(0);
 });
 
-it('refuses an exact-once rerun before mutating the target', async () => {
-  const client = fakeClient([
-    { when: /migration_import_receipts/, result: { rows: [{ migration_id: PLAN.migration_id, receipt_sha256: 'e'.repeat(64), status: 'complete' }], rowCount: 1 } },
-  ]);
-  await expect(importPlan({ client, plan: PLAN, dryRun: buildDryRunReport({ plan: PLAN, targetIdentity: IDENTITY }), targetIdentity: IDENTITY })).rejects.toMatchObject({ code: 'RMIG-E-RECEIPT-MISMATCH' });
-  expect(client.calls.filter(({ text }) => /^(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|CREATE)/i.test(text))).toHaveLength(0);
+it('refuses an exact-once rerun before mutating the target when no staging receipt is supplied', async () => {
+  const client = fakeClient();
+  await expect(importPlan({ client, plan: PLAN, dryRun: buildDryRunReport({ plan: PLAN, targetIdentity: IDENTITY }), targetIdentity: IDENTITY })).rejects.toMatchObject({ code: 'RMIG-E-DRY-RUN-REQUIRED' });
+  expect(client.calls).toHaveLength(0);
 });

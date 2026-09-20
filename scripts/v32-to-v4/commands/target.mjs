@@ -5,7 +5,7 @@ import { parseEnvReference } from '../source/postgres-v32.mjs';
 import { createV4MigrationRunner } from '../../migrate-postgres.mjs';
 import { MigrationRefusal } from '../lib/refusal.mjs';
 import { canonicalJson } from '../lib/canonical-json.mjs';
-import { buildDryRunReport, importPlan, inspectTarget, prepareTarget, readTargetIdentity } from '../target/postgres.mjs';
+import { buildDryRunReport, dryRunStaging, importPlan, inspectTarget, prepareTarget, readTargetIdentity } from '../target/postgres.mjs';
 
 const { Client } = pg;
 
@@ -54,8 +54,8 @@ export function parseTargetCommandArgs(command, argv) {
     hash(requireValue(values, '--bundle-manifest-sha256'), 'bundle-manifest-sha256');
     hash(requireValue(values, '--compiled-policy-sha256'), 'compiled-policy-sha256');
   }
-  if (command === 'dry-run') { requireValue(values, '--plan'); requireValue(values, '--receipt-out'); }
-  if (command === 'import') { requireValue(values, '--plan'); requireValue(values, '--dry-run'); }
+  if (command === 'dry-run') { requireValue(values, '--plan'); requireValue(values, '--staging-schema'); requireValue(values, '--receipt-out'); }
+  if (command === 'import') { requireValue(values, '--plan'); requireValue(values, '--dry-run'); requireValue(values, '--staging-schema'); }
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [key.slice(2).replace(/-([a-z])/gu, (_match, letter) => letter.toUpperCase()), value]));
 }
 
@@ -72,7 +72,7 @@ export async function targetCommand(command, argv) {
   if (command === 'dry-run') return withTarget(parsed.target, async (client) => {
     const plan = loadJson(parsed.plan, 'The relational staging plan');
     const target = await readTargetIdentity({ client });
-    const report = buildDryRunReport({ plan, targetIdentity: target });
+    const report = await dryRunStaging({ client, plan, stagingSchema: parsed.stagingSchema, targetIdentity: target });
     writeJson(parsed.receiptOut, report);
     return { command, receipt_sha256: report.receipt_sha256, report_path: parsed.receiptOut };
   });

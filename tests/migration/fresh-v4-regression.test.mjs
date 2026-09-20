@@ -1,0 +1,155 @@
+import { describe, expect, it } from 'vitest';
+import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
+import { readV4Migrations, migrationSetSha256, V4_MIGRATOR_VERSION } from '../../scripts/migrate-postgres.mjs';
+import { buildIdMaps } from '../../scripts/v32-to-v4/transform/id-map.mjs';
+import { assertTargetRow, TARGET_SCHEMAS } from '../../scripts/v32-to-v4/transform/target-schema.mjs';
+import { transformRelational } from '../../scripts/v32-to-v4/transform/relational.mjs';
+import {
+  buildDryRunReport,
+  importPlan,
+  normalizePostgresIdentity,
+  parseTargetIdentity,
+  prepareTarget,
+  validateRelationalPlan,
+} from '../../scripts/v32-to-v4/target/postgres.mjs';
+
+const HASH = 'a'.repeat(64);
+const PLAN = {
+  format_version: 1,
+  plan_type: 'relational-staging',
+  migration_id: 'rmig_regression_v4',
+  bundle_manifest_sha256: HASH,
+  compiled_policy_sha256: 'b'.repeat(64),
+  migration_set_sha256: 'c'.repeat(64),
+  migrator_version: '4.0.1',
+  members: {
+    entities: [{ id: 1, name: 'Alice', entity_type: 'person', primary_context: 'default', salience: 'active' }],
+    people: [{ id: 1, name: 'Alice', kind: 'person', primary_context: 'default', salience: 'active' }],
+    observations: [{ id: 4, entity_id: 1, person_id: 1, content: 'hello', linked_observation_id: 5 }],
+  },
+  coverage: {},
+  losses: [],
+};
+const TARGET = parseTargetIdentity({
+  database_name: 'mind', database_oid: 42, server_address: null, server_port: 5432, server_version: 160000,
+});
+
+function fakeClient(responses = []) {
+  const calls = [];
+  return {
+    calls,
+    async query(text, values = []) {
+      calls.push({ text, values });
+      const match = responses.find((item) => item.when instanceof RegExp ? item.when.test(text) : item.when === text);
+      if (match?.throw) throw match.throw;
+      return match?.result ?? { rows: [], rowCount: 0 };
+    },
+  };
+}
+
+describe('fresh-v4 review regressions', () => {
+  it('canonicalizes numeric and string ports and preserves a null socket address', () => {
+    const numeric = normalizePostgresIdentity({ database_name: 'mind', database_oid: 42, server_address: null, server_port: 5432, server_version: 160000 });
+    const textual = normalizePostgresIdentity({ database_name: 'mind', database_oid: '42', server_address: null, server_port: '5432', server_version: '160000' });
+    expect(numeric).toEqual(textual);
+    expect(numeric.server_port).toBe(5432);
+    expect(numeric.server_address).toBeNull();
+    expect(parseTargetIdentity(numeric).database_identity_sha256).toBe(parseTargetIdentity(textual).database_identity_sha256);
+  });
+
+  it('models released compatibility entities and does not model the removed charge_note column', () => {
+    expect(TARGET_SCHEMAS.entities.columns).toMatchObject({ id: 'integer', entity_type: 'text', affect_n: 'integer' });
+    expect(TARGET_SCHEMAS.observations.columns).not.toHaveProperty('charge_note');
+    expect(TARGET_SCHEMAS.entities.columns).not.toHaveProperty('kind');
+  });
+
+  it('transforms an entity into compatibility and routed rows with matching identity', () => {
+    const source = { entities: [{ id: 1, name: 'Alice', entity_type: 'person', primary_context: 'default', salience: 'active' }] };
+    const idMaps = buildIdMaps(source, { items: [] });
+    const plan = transformRelational({
+      tables: source,
+      compiledPolicy: { id_map: idMaps.idMap, name_map: idMaps.serializedNames, mapping_tables: ['entities'], losses: [] },
+      migrationId: PLAN.migration_id,
+      bundleManifestSha256: HASH,
+      compiledPolicySha256: 'b'.repeat(64),
+    });
+    expect(plan.members.entities).toEqual([expect.objectContaining({ id: 1, entity_type: 'person' })]);
+    expect(plan.members.people).toEqual([expect.objectContaining({ id: 1, kind: 'person' })]);
+    assertTargetRow('entities', plan.members.entities[0]);
+  });
+
+  it('builds a receipt with plan, migration, runner, stage, and target-state bindings', () => {
+    const report = buildDryRunReport({
+      plan: PLAN,
+      targetIdentity: TARGET,
+      migrationSetSha256: PLAN.migration_set_sha256,
+      migratorVersion: PLAN.migrator_version,
+      stageContentSha256: canonicalSha256(PLAN.members),
+      targetStateSha256: HASH,
+      status: 'validated',
+    });
+    expect(report).toMatchObject({
+      migration_set_sha256: PLAN.migration_set_sha256,
+      migrator_version: PLAN.migrator_version,
+      stage_content_sha256: expect.any(String),
+      target_state_sha256: HASH,
+      status: 'validated',
+    });
+    expect(report.receipt_sha256).toMatch(/^[0-9a-f]{64}$/u);
+  });
+
+  it('rejects invalid entity and self-reference FKs before PostgreSQL mutation', () => {
+    const invalid = { ...PLAN, members: { ...PLAN.members, observations: [{ ...PLAN.members.observations[0], linked_observation_id: 999 }] } };
+    expect(validateRelationalPlan(invalid).foreign_keys.violations).toEqual([expect.objectContaining({ field: 'linked_observation_id', value: 999 })]);
+    expect(validateRelationalPlan(invalid).foreign_keys.violations).toEqual(expect.any(Array));
+  });
+
+  it('defers forward and cyclic observation self-FKs until all observations exist', async () => {
+    const currentMigrations = await readV4Migrations();
+    const currentSet = migrationSetSha256(currentMigrations);
+    const cyclePlan = { ...PLAN, migration_set_sha256: currentSet, migrator_version: V4_MIGRATOR_VERSION, members: { ...PLAN.members, observations: [
+      { id: 4, entity_id: 1, person_id: 1, content: 'four', linked_observation_id: 5 },
+      { id: 5, entity_id: 1, person_id: 1, content: 'five', linked_observation_id: 4 },
+    ] } };
+    const stageHash = canonicalSha256(cyclePlan.members);
+    const targetStateHash = canonicalSha256({ objects: [], counts: [] });
+    const dryRun = buildDryRunReport({ plan: cyclePlan, targetIdentity: TARGET, migrationSetSha256: currentSet, migratorVersion: V4_MIGRATOR_VERSION, stageContentSha256: stageHash, targetStateSha256: targetStateHash });
+    const planHash = dryRun.plan_sha256;
+    const rows = Object.entries(cyclePlan.members).flatMap(([table, values]) => values.map((row, row_index) => ({ table_name: table, row_index, row_json: row, row_sha256: canonicalSha256(row) })));
+    const client = fakeClient([
+      { when: /current_database/u, result: { rows: [{ database_name: 'mind', database_oid: '42', server_address: null, server_port: '5432', server_version: '160000' }] } },
+      { when: /\/\* target_state \*\//u, result: { rows: [] } },
+      { when: /SELECT version, checksum FROM public\.schema_migrations/u, result: { rows: currentMigrations.map(({ file, checksum }) => ({ version: file, checksum })) } },
+      { when: /FROM "rmig_stage"\."run_metadata"/u, result: { rows: [{ migration_id: cyclePlan.migration_id, bundle_manifest_sha256: cyclePlan.bundle_manifest_sha256, compiled_policy_sha256: cyclePlan.compiled_policy_sha256, target_identity_sha256: TARGET.database_identity_sha256, migration_set_sha256: currentSet, migrator_version: V4_MIGRATOR_VERSION, plan_sha256: planHash, stage_content_sha256: stageHash, dry_run_receipt_sha256: dryRun.receipt_sha256, target_state_sha256: targetStateHash, status: 'dry-run' }], rowCount: 1 } },
+      { when: /run_rows/u, result: { rows } },
+    ]);
+    await expect(importPlan({ client, plan: cyclePlan, dryRun, targetIdentity: TARGET, stagingSchema: 'rmig_stage' })).resolves.toMatchObject({ status: 'complete', inserted_rows: 3 });
+    const inserts = client.calls.filter(({ text }) => /^INSERT INTO "public"/u.test(text));
+    const updates = client.calls.filter(({ text }) => /^UPDATE public\."observations"/u.test(text));
+    expect(inserts.some(({ text }) => text.includes('"entities"'))).toBe(true);
+    expect(inserts.filter(({ text }) => text.includes('"observations"'))).toHaveLength(2);
+    expect(inserts.filter(({ text }) => text.includes('"linked_observation_id"'))).toHaveLength(0);
+    expect(updates).toHaveLength(2);
+  });
+  it('refuses direct import without a bound staging schema', async () => {
+    const client = fakeClient();
+    const dryRun = buildDryRunReport({ plan: PLAN, targetIdentity: TARGET });
+    await expect(importPlan({ client, plan: PLAN, dryRun, targetIdentity: TARGET })).rejects.toMatchObject({ code: 'RMIG-E-DRY-RUN-REQUIRED' });
+    expect(client.calls).toEqual([]);
+  });
+
+  it('preparation uses an atomic runner mode so a failed migration cannot strand a partial ledger', async () => {
+    const client = fakeClient([
+      { when: /SHOW transaction_read_only/u, result: { rows: [{ transaction_read_only: 'on' }] } },
+      { when: /current_database/u, result: { rows: [{ database_name: 'target', database_oid: '12', server_address: null, server_port: '5432', server_version: '160000' }] } },
+      { when: /non_system_objects/u, result: { rows: [{ object_count: '0', schemas: [] }] } },
+      { when: /pg_available_extensions/u, result: { rows: [{ available: true }] } },
+    ]);
+    const runner = { run: async (options) => { expect(options).toMatchObject({ atomic: true }); throw new Error('migration failed'); } };
+    await expect(prepareTarget({
+      client, migrationRunner: runner, sourceIdentity: { database_identity_sha256: 'f'.repeat(64) },
+      migrationId: PLAN.migration_id, bundleManifestSha256: PLAN.bundle_manifest_sha256,
+      compiledPolicySha256: PLAN.compiled_policy_sha256,
+    })).rejects.toThrow('migration failed');
+  });
+});

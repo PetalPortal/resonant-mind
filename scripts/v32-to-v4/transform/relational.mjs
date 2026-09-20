@@ -96,7 +96,7 @@ function mapOne(mapping, row, index, compiled) {
   }
   // A nullable reviewed link is omitted rather than emitting a stale source FK.
   for (const [field, value] of Object.entries(target)) if (value === null && !TARGET_SCHEMAS[targetTable].required.includes(field)) delete target[field];
-  if ((TARGET_SCHEMAS[targetTable].required ?? []).some((field) => target[field] === null || target[field] === undefined)) return null;
+  if ((TARGET_SCHEMAS[targetTable].required ?? []).some((field) => (target[field] === null || target[field] === undefined) && !(TARGET_SCHEMAS[targetTable].generated ?? []).includes(field))) return null;
   assertTargetRow(targetTable, target);
   return target;
 }
@@ -128,7 +128,28 @@ export function transformRelational({ bundle, tables: inputTables, compiledPolic
   for (const mapping of mappings) {
     const rows = tables[mapping.source_table] ?? []; coverage[mapping.source_table] = { source_rows: rows.length, transformed_rows: 0, excluded_rows: 0, target_tables: mapping.target_tables };
     if (mapping.source_table === 'embeddings') continue;
-    for (const [index, row] of rows.entries()) { const mapped = mapOne(mapping, row, index, compiled); if (mapped === null) { coverage[mapping.source_table].excluded_rows += 1; continue; } const targetTable = mapping.source_table === 'entities' ? (targetMap(compiled, 'entities', sourceId(row, index))?.target_table ?? 'nodes') : mapping.target_tables[0]; (members[targetTable] ??= []).push(mapped); coverage[mapping.source_table].transformed_rows += 1; }
+    for (const [index, row] of rows.entries()) {
+      const mapped = mapOne(mapping, row, index, compiled);
+      if (mapped === null) { coverage[mapping.source_table].excluded_rows += 1; continue; }
+      const targetTable = mapping.source_table === 'entities' ? (targetMap(compiled, 'entities', sourceId(row, index))?.target_table ?? 'nodes') : mapping.target_tables[0];
+      (members[targetTable] ??= []).push(mapped);
+      if (mapping.source_table === 'entities') {
+        // public.entities remains a released-schema compatibility surface. The
+        // AFTER trigger routes this row into exactly one people/nodes row.
+        const compatibility = {
+          id: mapped.id,
+          name: mapped.name,
+          entity_type: mapped.kind,
+          ...(mapped.primary_context === undefined ? {} : { primary_context: mapped.primary_context }),
+          ...(mapped.salience === undefined ? {} : { salience: mapped.salience }),
+          ...(mapped.created_at === undefined ? {} : { created_at: mapped.created_at }),
+          ...(mapped.updated_at === undefined ? {} : { updated_at: mapped.updated_at }),
+        };
+        assertTargetRow('entities', compatibility);
+        (members.entities ??= []).push(compatibility);
+      }
+      coverage[mapping.source_table].transformed_rows += 1;
+    }
   }
   for (const rows of Object.values(members)) rows.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)));
   for (const [table, value] of Object.entries(coverage)) value.losses = (compiled.losses ?? []).filter((loss) => loss.source_table === table).length;
