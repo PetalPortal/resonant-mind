@@ -516,3 +516,20 @@ export async function writeNdjsonMember({ path, rows, encrypted = false, migrati
 export const writeMember = writeNdjsonMember;
 export const readPassphraseFile = passphraseBytes;
 export { passphraseBytes, aadFor, MAGIC, HEADER_BYTES };
+
+export function readBundleMember({ path, manifest, member, env = process.env, platform = process.platform, passphraseFile } = {}) {
+  const bytes = readControlBytes(join(resolve(path), ...member.name.split('/')));
+  if (manifest.bundle_mode !== 'encrypted') return bytes;
+  const passphrase = passphraseBytes({ env, platform, phase: 'compile-policy', passphraseFile });
+  let key;
+  try {
+    if (bytes.length < HEADER_BYTES + TAG_BYTES || !bytes.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Encrypted member header is invalid.');
+    const salt = bytes.subarray(MAGIC.length, MAGIC.length + SALT_BYTES);
+    const nonce = bytes.subarray(MAGIC.length + SALT_BYTES, HEADER_BYTES);
+    key = deriveKey(passphrase, salt);
+    const decipher = createDecipheriv('aes-256-gcm', key, nonce);
+    decipher.setAAD(aadFor(manifest.migration_id, member.name));
+    decipher.setAuthTag(bytes.subarray(bytes.length - TAG_BYTES));
+    return Buffer.concat([decipher.update(bytes.subarray(HEADER_BYTES, bytes.length - TAG_BYTES)), decipher.final()]);
+  } finally { key?.fill(0); passphrase.fill(0); }
+}

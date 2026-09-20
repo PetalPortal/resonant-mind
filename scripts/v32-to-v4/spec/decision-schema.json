@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Resonant Mind migration decision manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["format_version", "manifest_type", "migration_id", "bundle_manifest_sha256", "reviewed", "generated_at", "reviewed_by", "reviewed_at", "items", "manifest_sha256"],
+  "properties": {
+    "format_version": {"const": 1},
+    "manifest_type": {"const": "ambiguity-decision-manifest"},
+    "migration_id": {"type": "string", "minLength": 8},
+    "bundle_manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reviewed": {"type": "boolean"},
+    "generated_at": {"type": "string"},
+    "reviewed_by": {"type": ["string", "null"]},
+    "reviewed_at": {"type": ["string", "null"]},
+    "items": {"type": "array"},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
