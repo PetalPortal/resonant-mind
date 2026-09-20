@@ -13,8 +13,9 @@ const expectedHelp = `Usage: npm run migrate:v32 -- <command>
 
 Commands:
   inspect-source
-  export
-  verify-bundle
+  export         --source-kind ... --source ... --migration-id ... --bundle ... [--passphrase-file ...]
+                 [--allow-plaintext-bundle --acknowledge-plaintext-risk]
+  verify-bundle  --bundle ... [--passphrase-file ...]
   compile-policy
   inspect-target
   prepare-target

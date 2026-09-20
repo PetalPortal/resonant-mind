@@ -13,12 +13,13 @@ function parseFlags(argv, allowed) {
   for (let index = 0; index < argv.length; index += 1) {
     const key = argv[index];
     if (!allowed.has(key)) throw refusal('export accepts only documented options; pass --help for usage.');
-    if (key === '--allow-plaintext-bundle' || key === '--acknowledge-plaintext-risk' || key === '--plaintext') {
+    if (key === '--allow-plaintext-bundle' || key === '--acknowledge-plaintext-risk') {
       result[key] = true;
       continue;
     }
     const value = argv[index + 1];
     if (typeof value !== 'string' || value.startsWith('--')) throw refusal(`export requires a value for ${key}.`);
+    if (result[key] !== undefined) throw refusal(`export option ${key} may be supplied only once.`);
     result[key] = value;
     index += 1;
   }
@@ -27,20 +28,23 @@ function parseFlags(argv, allowed) {
 
 export function parseExportArgs(argv) {
   const values = parseFlags(argv, new Set([
-    '--source-kind', '--source', '--source-report', '--source-fingerprint', '--migration-id', '--output', '--tables',
-    '--allow-plaintext-bundle', '--acknowledge-plaintext-risk', '--plaintext',
+    '--source-kind', '--source', '--source-report', '--source-fingerprint', '--migration-id', '--bundle', '--passphrase-file',
+    '--allow-plaintext-bundle', '--acknowledge-plaintext-risk',
   ]));
-  const required = ['--source-kind', '--source', '--migration-id', '--output'];
-  if (required.some((key) => typeof values[key] !== 'string')) throw refusal('export requires --source-kind, --source, --migration-id, and --output.');
-  const sourceReport = values['--source-report'] === undefined ? undefined : JSON.parse(readFileSync(values['--source-report'], 'utf8'));
-  const mode = values['--plaintext'] === true ? 'plaintext' : 'encrypted';
+  const required = ['--source-kind', '--source', '--migration-id', '--bundle'];
+  if (required.some((key) => typeof values[key] !== 'string')) throw refusal('export requires --source-kind, --source, --migration-id, and --bundle.');
+  let sourceReport;
+  try { sourceReport = values['--source-report'] === undefined ? undefined : JSON.parse(readFileSync(values['--source-report'], 'utf8')); }
+  catch { throw refusal('The source report is missing or invalid JSON.'); }
+  const plaintextFlags = values['--allow-plaintext-bundle'] === true || values['--acknowledge-plaintext-risk'] === true;
+  const plaintext = values['--allow-plaintext-bundle'] === true && values['--acknowledge-plaintext-risk'] === true;
+  if (plaintextFlags && !plaintext) throw new MigrationRefusal({ code: 'RMIG-E-BUNDLE-PLAINTEXT-ACK', phase: 'export', summary: 'Plaintext bundles require both explicit acknowledgement flags.', safe_details: {}, report_path: null });
   return {
     sourceKind: values['--source-kind'], source: values['--source'], sourceReport,
     sourceFingerprint: values['--source-fingerprint'] ?? sourceReport?.details?.actual_fingerprint,
-    migrationId: values['--migration-id'], outputPath: values['--output'],
-    tables: values['--tables']?.split(',').filter(Boolean), mode,
-    allowPlaintextBundle: values['--allow-plaintext-bundle'] === true,
-    acknowledgePlaintextRisk: values['--acknowledge-plaintext-risk'] === true,
+    migrationId: values['--migration-id'], outputPath: values['--bundle'], passphraseFile: values['--passphrase-file'],
+    mode: plaintext ? 'plaintext' : 'encrypted',
+    allowPlaintextBundle: plaintext, acknowledgePlaintextRisk: plaintext,
   };
 }
 

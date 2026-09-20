@@ -33,7 +33,20 @@ const commands = [
 const help = `Usage: npm run migrate:v32 -- <command>
 
 Commands:
-${commands.map((command) => `  ${command}`).join('\n')}
+  inspect-source
+  export         --source-kind ... --source ... --migration-id ... --bundle ... [--passphrase-file ...]
+                 [--allow-plaintext-bundle --acknowledge-plaintext-risk]
+  verify-bundle  --bundle ... [--passphrase-file ...]
+  compile-policy
+  inspect-target
+  prepare-target
+  dry-run
+  import
+  plan-images
+  copy-images
+  plan-reembed
+  validate
+  status
 `;
 
 export function main({

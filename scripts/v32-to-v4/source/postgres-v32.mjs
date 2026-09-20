@@ -35,13 +35,85 @@ function quoteIdentifier(value) {
   return `"${value}"`;
 }
 
+function qualifiedTable(value) {
+  return `${quoteIdentifier(SCHEMA)}.${quoteIdentifier(value)}`;
+}
+
 function actionName(value) {
   return ({ c: 'CASCADE', n: 'NO ACTION', r: 'RESTRICT', a: 'NO ACTION', d: 'SET DEFAULT', })[value] ?? 'NO ACTION';
 }
 
-function parseIndexDefinition(definition) {
-  const match = typeof definition === 'string' ? definition.match(/\((.*)\)(?:\s+WHERE\s+(.*))?$/u) : null;
-  return { columns: match ? match[1].split(',').map((value) => value.trim().replaceAll('"', '').replace(/\s+(?:ASC|DESC)\b.*$/iu, '')) : [], where: match?.[2] ?? null };
+function matchingParen(text, start) {
+  let depth = 0;
+  let quote = null;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote !== null) {
+      if (char === quote && text[index + 1] === quote) { index += 1; continue; }
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    if (char === '(') depth += 1;
+    if (char === ')') {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+function splitTopLevel(text) {
+  const parts = [];
+  let start = 0;
+  let depth = 0;
+  let quote = null;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote !== null) {
+      if (char === quote && text[index + 1] === quote) { index += 1; continue; }
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"') { quote = char; continue; }
+    if (char === '(') depth += 1;
+    else if (char === ')') depth -= 1;
+    else if (char === ',' && depth === 0) { parts.push(text.slice(start, index).trim()); start = index + 1; }
+  }
+  parts.push(text.slice(start).trim());
+  return parts.filter(Boolean);
+}
+
+function unquoteIdentifier(value) {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith('`') && trimmed.endsWith('`'))) return trimmed.slice(1, -1).replaceAll(trimmed[0] + trimmed[0], trimmed[0]);
+  return trimmed;
+}
+
+export function parseIndexDefinition(definition) {
+  if (typeof definition !== 'string') return { columns: [], expressions: [], opclass: null, where: null, options: null };
+  const using = definition.match(/\bUSING\s+([A-Za-z_][A-Za-z0-9_]*)\s*/iu);
+  const open = using ? definition.indexOf('(', using.index + using[0].length) : definition.indexOf('(');
+  const close = open < 0 ? -1 : matchingParen(definition, open);
+  if (open < 0 || close < 0) return { columns: [], expressions: [], opclass: null, where: null, options: null };
+  const columns = [];
+  const expressions = [];
+  let opclass = null;
+  for (const rawPart of splitTopLevel(definition.slice(open + 1, close))) {
+    const part = rawPart.replace(/\s+(?:ASC|DESC)\b(?:\s+NULLS\s+(?:FIRST|LAST))?\s*$/iu, '').trim();
+    const opclassMatch = part.match(/^(.*?)(?:\s+([A-Za-z_][A-Za-z0-9_]*))$/u);
+    const expression = (opclassMatch ? opclassMatch[1] : part).trim();
+    const candidateOpclass = opclassMatch?.[2] ?? null;
+    const normalized = unquoteIdentifier(expression);
+    if (/^[A-Za-z_][A-Za-z0-9_]*$/u.test(normalized) || /^"(?:[^"]|"")+"$/u.test(expression)) columns.push(normalized);
+    else expressions.push(normalized);
+    if (candidateOpclass && /_ops$/iu.test(candidateOpclass)) opclass ??= candidateOpclass.toLowerCase();
+  }
+  const rest = definition.slice(close + 1);
+  const optionsMatch = rest.match(/\bWITH\s*\((.*)\)/iu);
+  const options = optionsMatch ? splitTopLevel(optionsMatch[1]).map((entry) => entry.trim().replace(/\s*=\s*/u, ' = ')).join(', ') : null;
+  const whereMatch = rest.match(/\bWHERE\s+(.+?)(?:\s+WITH\s*\(|$)/iu);
+  return { columns, expressions, opclass, where: whereMatch?.[1]?.trim() ?? null, options };
 }
 
 function buildCatalog(columnRows, constraintRows, checkRows, indexRows) {
@@ -68,14 +140,26 @@ function buildCatalog(columnRows, constraintRows, checkRows, indexRows) {
   for (const row of checkRows) table(row.table_name).checks.push({ name: row.constraint_name, expression: row.expression });
   for (const row of indexRows) {
     const parsed = parseIndexDefinition(row.definition);
-    table(row.table_name).indexes.push({ name: row.index_name, unique: Boolean(row.is_unique), columns: parsed.columns, where: row.predicate ?? parsed.where, ...(row.index_method ? { method: row.index_method } : {}) });
+    const method = row.index_method ? String(row.index_method).toLowerCase() : null;
+    const index = {
+      name: row.index_name,
+      unique: Boolean(row.is_unique),
+      columns: parsed.columns,
+      where: row.predicate ?? parsed.where,
+      ...(parsed.expressions.length > 0 ? { expressions: parsed.expressions } : {}),
+      ...(method && method !== 'btree' ? { method } : {}),
+      ...(parsed.opclass ? { opclass: parsed.opclass } : {}),
+      ...(parsed.options ? { options: parsed.options } : {}),
+    };
+    table(row.table_name).indexes.push(index);
   }
   return { family: 'postgres-v3.2.0', catalog_version: 'v3.2.0', tables: [...tables.values()] };
 }
 
 export class PostgresV32Adapter {
-  constructor({ source, env = process.env, clientFactory } = {}) {
+  constructor({ source, env = process.env, clientFactory, batchSize = 1000 } = {}) {
     const name = parseEnvReference(source);
+    if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 10_000) throw refusal('RMIG-E-SOURCE-ARG', 'The PostgreSQL batch size is invalid.', { batch_size: '1-10000' });
     const value = env?.[name];
     if (typeof value !== 'string' || value.length === 0) throw refusal('RMIG-E-SOURCE-ARG', 'The PostgreSQL environment variable is unset or empty.', { reference: `env:${name}` });
     this.sourceReference = `env:${name}`;
@@ -84,6 +168,7 @@ export class PostgresV32Adapter {
       const { Client } = require('pg');
       return new Client({ connectionString });
     });
+    this.#batchSize = batchSize;
     this.#client = null;
     this.#snapshot = false;
     this.#transactionStarted = false;
@@ -93,6 +178,7 @@ export class PostgresV32Adapter {
   #connectionString;
   #clientFactory;
   #client;
+  #batchSize;
   #snapshot;
   #transactionStarted;
   #closed;
@@ -149,15 +235,31 @@ export class PostgresV32Adapter {
     if (!TABLES.has(table)) throw refusal('RMIG-E-SOURCE-FINGERPRINT', 'The requested table is not in the exact public v3.2 catalog.', { table });
     const catalogTable = sourceSpecFor('postgres').tables.find((item) => item.name === table);
     const order = primaryKey ?? catalogTable?.primary_key ?? [];
-    if (!Array.isArray(order) || order.some((column) => !catalogTable?.primary_key.includes(column))) throw refusal('RMIG-E-BUNDLE-INTEGRITY', 'The requested table order is not its exact primary key.', { table });
-    const orderBy = order.length === 0 ? '' : ` ORDER BY ${order.map(quoteIdentifier).join(', ')}`;
-    const result = await this.#query(`SELECT * FROM ${quoteIdentifier(table)}${orderBy}`);
-    for (const row of result.rows) yield row;
+    if (!Array.isArray(order) || order.length === 0 || order.some((column) => !catalogTable?.primary_key.includes(column))) throw refusal('RMIG-E-BUNDLE-INTEGRITY', 'The requested table order is not its exact primary key.', { table });
+    const qualified = qualifiedTable(table);
+    const orderBy = order.map((column) => `${qualified}.${quoteIdentifier(column)}`).join(', ');
+    let previous;
+    for (;;) {
+      const values = [];
+      let where = '';
+      if (previous !== undefined) {
+        const placeholders = order.map((_column, index) => `$${index + 1}`);
+        values.push(...order.map((column) => previous[column]));
+        where = ` WHERE (${order.map((column) => `${qualified}.${quoteIdentifier(column)}`).join(', ')}) > (${placeholders.join(', ')})`;
+      }
+      values.push(this.#batchSize);
+      const limitPlaceholder = `$${values.length}`;
+      const result = await this.#query(`SELECT * FROM ${qualified}${where} ORDER BY ${orderBy} LIMIT ${limitPlaceholder}`, values);
+      if (result.rows.length === 0) break;
+      for (const row of result.rows) yield row;
+      previous = result.rows[result.rows.length - 1];
+      if (result.rows.length < this.#batchSize) break;
+    }
   }
 
   async rowCount(table) {
     if (!TABLES.has(table)) throw refusal('RMIG-E-SOURCE-FINGERPRINT', 'The requested table is not allowlisted.', { table });
-    const result = await this.#query(`SELECT count(*)::text AS row_count FROM "${table}"`);
+    const result = await this.#query(`SELECT count(*)::text AS row_count FROM ${qualifiedTable(table)}`);
     return String(result.rows[0]?.row_count ?? '0');
   }
 

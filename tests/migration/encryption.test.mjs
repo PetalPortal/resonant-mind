@@ -24,7 +24,7 @@ async function make(root, passphrasePath, platform = process.platform) {
   return createBundle({
     adapter: adapter(), sourceKind: 'sqlite', sourceFingerprint: fingerprint,
     migrationId: 'rmig_20260919_encryption', timestamp: '2026-09-19T12:34:56.000Z',
-    outputPath: join(root, 'bundle'), tables: ['observations'],
+    outputPath: join(root, 'bundle'),
     env: { RM_MIGRATION_PASSPHRASE_FILE: passphrasePath }, platform,
   });
 }

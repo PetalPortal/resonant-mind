@@ -15,6 +15,7 @@ const REMEDIATIONS = Object.freeze({
   'RMIG-E-SOURCE-DRIFT': 'Restore an unchanged supported source snapshot and restart inspection.',
   'RMIG-E-SOURCE-NOT-READONLY': 'Grant read-only source access and rerun the operation.',
   'RMIG-E-D1-REMOTE-UNSUPPORTED': 'Export D1 to a local SQL file and pass that file as a d1-export source.',
+  'RMIG-E-D1-SQL-UNSAFE': 'Use a standard local D1 export containing only the supported SQLite schema and data statements.',
   'RMIG-E-BUNDLE-PLAINTEXT-ACK': 'Use encryption or supply both explicit plaintext-risk acknowledgement flags.',
   'RMIG-E-BUNDLE-INTEGRITY': 'Regenerate the bundle from the verified source and do not reuse altered members.',
   'RMIG-E-BUNDLE-DECRYPT': 'Use the matching passphrase file for this unchanged bundle.',

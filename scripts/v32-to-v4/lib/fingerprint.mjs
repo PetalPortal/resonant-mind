@@ -56,6 +56,7 @@ function normalizeConstraint(value, kind) {
     ...(value.method === undefined ? {} : { method: String(value.method).toLowerCase() }),
     ...(value.opclass === undefined ? {} : { opclass: String(value.opclass) }),
     ...(value.options === undefined ? {} : { options: String(value.options) }),
+    ...(value.expressions === undefined ? {} : { expressions: [...value.expressions].map(String) }),
   };
 }
 

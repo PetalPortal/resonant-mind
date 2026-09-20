@@ -20,6 +20,7 @@ import {
   writeReportAtomic,
 } from '../../scripts/v32-to-v4/lib/report.mjs';
 import { canonicalJson } from '../../scripts/v32-to-v4/lib/canonical-json.mjs';
+import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
 import { assertNodeVersion } from '../../scripts/v32-to-v4/lib/runtime.mjs';
 
 const SHA_A = 'a'.repeat(64);
@@ -50,7 +51,18 @@ const minimumCodes = [
   'RMIG-E-VALIDATION',
 ];
 
+function bundleMembers(suffix = '.enc') {
+  return [
+    { name: `data/entities.ndjson${suffix}`, sha256: SHA_B, plaintext_sha256: SHA_A, row_count: 2 },
+    { name: `external/images.json${suffix}`, sha256: SHA_B, plaintext_sha256: SHA_A, row_count: 1 },
+    { name: `external/reembed-jobs.ndjson${suffix}`, sha256: SHA_B, plaintext_sha256: SHA_A, row_count: 1 },
+    { name: `policy-template.json${suffix}`, sha256: SHA_B, plaintext_sha256: SHA_A, row_count: 1 },
+    { name: `source-report.json${suffix}`, sha256: SHA_B, plaintext_sha256: SHA_A, row_count: 1 },
+  ];
+}
+
 function manifest(overrides = {}) {
+  const secretReview = { decisions: [], false_positive_acknowledgements: [] };
   return {
     format_version: 1,
     migrator_version: '1.0.0',
@@ -63,14 +75,8 @@ function manifest(overrides = {}) {
       allow_plaintext_bundle: false,
       acknowledge_plaintext_risk: false,
     },
-    members: [
-      {
-        name: 'data/entities.ndjson.enc',
-        sha256: SHA_B,
-        plaintext_sha256: SHA_A,
-        row_count: 2,
-      },
-    ],
+    secret_review: { ...secretReview, sha256: canonicalSha256(secretReview) },
+    members: bundleMembers(),
     ...overrides,
   };
 }
@@ -150,12 +156,15 @@ describe('closed versioned artifact contracts', () => {
   it('requires safe deterministic member ordering and mode-specific member names', () => {
     const value = manifest();
     value.members.push({ ...value.members[0], name: 'data/z.ndjson.enc' });
+    value.members.sort((a, b) => a.name.localeCompare(b.name));
     expect(() => validateManifest(value)).not.toThrow();
-    const reordered = manifest({ members: [{ ...manifest().members[0], name: 'data/z.ndjson.enc' }, manifest().members[0]] });
+    const reordered = manifest({ members: [...manifest().members].reverse() });
     expect(() => validateManifest(reordered)).toThrow(/order|sorted/i);
-    const plaintext = manifest({ bundle_mode: 'plaintext', plaintext_acknowledgements: { allow_plaintext_bundle: true, acknowledge_plaintext_risk: true }, members: [{ ...manifest().members[0], name: 'data/entities.ndjson' }] });
+    const plaintext = manifest({ bundle_mode: 'plaintext', plaintext_acknowledgements: { allow_plaintext_bundle: true, acknowledge_plaintext_risk: true }, members: bundleMembers('').sort((a, b) => a.name.localeCompare(b.name)) });
     expect(validateManifest(plaintext)).toEqual(plaintext);
-    const wrongSuffix = manifest({ members: [{ ...manifest().members[0], name: 'data/entities.ndjson' }] });
+    const wrongMembers = bundleMembers();
+    wrongMembers[0] = { ...wrongMembers[0], name: 'data/entities.ndjson' };
+    const wrongSuffix = manifest({ members: wrongMembers });
     expect(() => validateManifest(wrongSuffix)).toThrow(/encrypted|suffix|member/i);
   });
   it('rejects Windows-case collisions between manifest member paths', () => {

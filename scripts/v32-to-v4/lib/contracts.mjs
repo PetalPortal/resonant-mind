@@ -4,6 +4,12 @@ import { assertSafeBundleMemberPath, canonicalSha256 } from './hash.mjs';
 import { redact } from './redact.mjs';
 
 export const FORMAT_VERSION = 1;
+export const REQUIRED_BUNDLE_ARTIFACTS = Object.freeze([
+  'source-report.json',
+  'policy-template.json',
+  'external/images.json',
+  'external/reembed-jobs.ndjson',
+]);
 export const MIGRATION_PHASES = Object.freeze([
   'runtime',
   'inspect-source',
@@ -178,6 +184,7 @@ export function validateManifest(value) {
     'source_fingerprint',
     'bundle_mode',
     'plaintext_acknowledgements',
+    'secret_review',
     'members',
   ], 'Manifest');
   assertFormatVersion(fields.format_version);
@@ -210,6 +217,27 @@ export function validateManifest(value) {
     fail('plaintext_acknowledgements', 'must exactly match the bundle mode');
   }
 
+  const secretReview = assertExactKeys(fields.secret_review, ['decisions', 'false_positive_acknowledgements', 'sha256'], 'secret_review');
+  if (secretReview.sha256 !== canonicalSha256({ decisions: secretReview.decisions, false_positive_acknowledgements: secretReview.false_positive_acknowledgements })) fail('secret_review.sha256', 'does not match the canonical secret review content');
+  const decisionCount = assertDensePlainArray(secretReview.decisions, 'secret_review.decisions');
+  const decisionIds = new Set();
+  for (let index = 0; index < decisionCount; index += 1) {
+    const item = Object.getOwnPropertyDescriptor(secretReview.decisions, String(index)).value;
+    const decision = assertExactKeys(item, ['review_id', 'decision', 'reviewed_at', 'reviewed_by'], `secret_review.decisions[${index}]`);
+    if (!SHA256.test(decision.review_id) || decisionIds.has(decision.review_id)) fail(`secret_review.decisions[${index}].review_id`, 'must be a unique review ID');
+    if (!['retain', 'redact', 'exclude-row'].includes(decision.decision)) fail(`secret_review.decisions[${index}].decision`, 'must be retain, redact, or exclude-row');
+    assertTimestamp(decision.reviewed_at, `secret_review.decisions[${index}].reviewed_at`);
+    assertString(decision.reviewed_by, `secret_review.decisions[${index}].reviewed_by`);
+    decisionIds.add(decision.review_id);
+  }
+  const falsePositiveCount = assertDensePlainArray(secretReview.false_positive_acknowledgements, 'secret_review.false_positive_acknowledgements');
+  const falsePositiveIds = new Set();
+  for (let index = 0; index < falsePositiveCount; index += 1) {
+    const value = Object.getOwnPropertyDescriptor(secretReview.false_positive_acknowledgements, String(index)).value;
+    if (!SHA256.test(value) || falsePositiveIds.has(value)) fail(`secret_review.false_positive_acknowledgements[${index}]`, 'must contain unique review IDs');
+    falsePositiveIds.add(value);
+  }
+
   const memberCount = assertDensePlainArray(fields.members, 'members');
   const names = new Set();
   const windowsFoldedNames = new Map();
@@ -240,6 +268,16 @@ export function validateManifest(value) {
     previousName = name;
     names.add(name);
     windowsFoldedNames.set(windowsFoldedName, name);
+  }
+  const suffix = fields.bundle_mode === 'encrypted' ? '.enc' : '';
+  for (const artifact of REQUIRED_BUNDLE_ARTIFACTS) {
+    const requiredName = `${artifact}${suffix}`;
+    if (!names.has(requiredName)) fail('members', `must include required artifact ${requiredName}`);
+  }
+  for (const name of names) {
+    const isRequired = REQUIRED_BUNDLE_ARTIFACTS.some((artifact) => name === `${artifact}${suffix}`);
+    const isData = /^data\/[A-Za-z0-9._-]+\.ndjson(?:\.enc)?$/u.test(name);
+    if (!isRequired && !isData) fail('members', `contains an unsupported extra member ${name}`);
   }
   return value;
 }

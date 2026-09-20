@@ -1,5 +1,5 @@
 import { canonicalJson } from './canonical-json.mjs';
-import { sha256Hex } from './hash.mjs';
+import { canonicalSha256, sha256Hex } from './hash.mjs';
 
 const LIVED_FIELDS = /(?:content|body|text|summary|description|message|note|prompt|context|value|reason|title|label)/iu;
 const METADATA_PATH = /(?:metadata|config|configuration|settings|credential|connection|environment|secret)/iu;
@@ -85,7 +85,8 @@ export function applyReviewDecisions(row, items, decisions = {}) {
   const output = structuredClone(row);
   let exclude = false;
   for (const item of items) {
-    const decision = decisions[item.review_id];
+    const raw = decisions[item.review_id];
+    const decision = typeof raw === 'object' && raw !== null ? raw.decision : raw;
     if (!['retain', 'redact', 'exclude-row'].includes(decision)) {
       throw new Error(`A decision is required for secret review item ${item.review_id}.`);
     }
@@ -101,4 +102,39 @@ export function applyReviewDecisions(row, items, decisions = {}) {
     }
   }
   return { row: output, exclude };
+}
+
+const REVIEW_ID = /^[0-9a-f]{64}$/u;
+const DECISIONS = new Set(['retain', 'redact', 'exclude-row']);
+
+function assertReviewText(value, label) {
+  if (typeof value !== 'string' || value.length === 0 || value !== value.trim() || /[\u0000-\u001f\u007f]/u.test(value)) throw new TypeError(`${label} must be a safe non-empty string.`);
+}
+
+function assertReviewTimestamp(value, label) {
+  assertReviewText(value, label);
+  if (new Date(value).toISOString() !== value) throw new TypeError(`${label} must be a canonical UTC timestamp.`);
+}
+
+export function normalizeSecretDecisions(decisions = {}, falsePositiveAcknowledgements = []) {
+  if (decisions === null || typeof decisions !== 'object' || Array.isArray(decisions) || Object.getPrototypeOf(decisions) !== Object.prototype) throw new TypeError('Secret decisions must be a plain object.');
+  if (!Array.isArray(falsePositiveAcknowledgements) || falsePositiveAcknowledgements.some((id) => typeof id !== 'string' || !REVIEW_ID.test(id))) throw new TypeError('False-positive acknowledgements must be review IDs.');
+  const normalized = [];
+  for (const [reviewId, value] of Object.entries(decisions)) {
+    if (!REVIEW_ID.test(reviewId)) throw new TypeError('Secret decision keys must be review IDs.');
+    if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError('Secret decisions must be structured records.');
+    const keys = Object.keys(value).sort();
+    if (keys.join(',') !== 'decision,reviewed_at,reviewed_by') throw new TypeError('Secret decision records must contain exactly decision, reviewed_at, and reviewed_by.');
+    if (!DECISIONS.has(value.decision)) throw new TypeError('Secret decision choice is invalid.');
+    assertReviewText(value.reviewed_by, 'Secret decision reviewed_by');
+    assertReviewTimestamp(value.reviewed_at, 'Secret decision reviewed_at');
+    normalized.push({ review_id: reviewId, decision: value.decision, reviewed_at: value.reviewed_at, reviewed_by: value.reviewed_by });
+  }
+  normalized.sort((left, right) => left.review_id.localeCompare(right.review_id));
+  const falsePositives = [...new Set(falsePositiveAcknowledgements)].sort();
+  return { decisions: normalized, false_positive_acknowledgements: falsePositives };
+}
+
+export function secretReviewHash(review) {
+  return canonicalSha256(review);
 }

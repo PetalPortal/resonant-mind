@@ -2,12 +2,13 @@ import {
   closeSync,
   constants,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
   readdirSync,
+  readSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -20,8 +21,8 @@ import { comparePrimaryKey, normalizeRow } from '../source/row-normalize.mjs';
 import { compareCatalog, sourceSpecFor } from './fingerprint.mjs';
 import { formatChecksumLines, sha256Hex, assertSafeBundleMemberPath } from './hash.mjs';
 import { MigrationRefusal } from './refusal.mjs';
-import { applyReviewDecisions, scanRows } from './secret-scan.mjs';
-import { FORMAT_VERSION, validateManifest } from './contracts.mjs';
+import { applyReviewDecisions, normalizeSecretDecisions, scanRows, secretReviewHash } from './secret-scan.mjs';
+import { FORMAT_VERSION, REQUIRED_BUNDLE_ARTIFACTS, validateManifest } from './contracts.mjs';
 
 const MAGIC = Buffer.from('RMIGENC1', 'ascii');
 const SALT_BYTES = 16;
@@ -43,6 +44,25 @@ function writeAll(fd, bytes) {
     if (written <= 0) throw new Error('Bundle write made no progress.');
     offset += written;
   }
+}
+
+function readControlBytes(path) {
+  const fd = openSync(path, constants.O_RDONLY);
+  const size = fstatSync(fd).size;
+  const bytes = Buffer.alloc(size);
+  try {
+    let offset = 0;
+    while (offset < size) {
+      const read = readSync(fd, bytes, offset, size - offset, offset);
+      if (read <= 0) throw new Error('Bundle control-file read made no progress.');
+      offset += read;
+    }
+    return bytes;
+  } finally { closeSync(fd); }
+}
+
+function readControlText(path) {
+  return readControlBytes(path).toString('utf8');
 }
 
 function syncDirectory(path) {
@@ -68,15 +88,15 @@ function assertDirectory(path, label, { mustExist = true } = {}) {
   return resolved;
 }
 
-function passphraseBytes({ env = process.env, platform = process.platform, phase = 'export' } = {}) {
-  const path = env?.[PASSPHRASE_ENV];
+function passphraseBytes({ env = process.env, platform = process.platform, phase = 'export', passphraseFile } = {}) {
+  const path = passphraseFile ?? env?.[PASSPHRASE_ENV];
   if (typeof path !== 'string' || path.length === 0) throw refusal('RMIG-E-BUNDLE-DECRYPT', phase, 'An encrypted bundle requires RM_MIGRATION_PASSPHRASE_FILE.', { source: PASSPHRASE_ENV });
   let item;
   try { item = lstatSync(path); } catch { throw refusal('RMIG-E-BUNDLE-DECRYPT', phase, 'The migration passphrase file could not be read.'); }
   if (item.isSymbolicLink() || !item.isFile()) throw refusal('RMIG-E-BUNDLE-DECRYPT', phase, 'The migration passphrase file must be a regular non-symlink file.');
   if (platform !== 'win32' && (item.mode & 0o077) !== 0) throw refusal('RMIG-E-BUNDLE-DECRYPT', phase, 'The migration passphrase file must not be readable by group or other users.');
   let value;
-  try { value = readFileSync(path); } catch { throw refusal('RMIG-E-BUNDLE-DECRYPT', phase, 'The migration passphrase file could not be read.'); }
+  try { value = readControlBytes(path); } catch { throw refusal('RMIG-E-BUNDLE-DECRYPT', phase, 'The migration passphrase file could not be read.'); }
   if (value.length > 0 && value[value.length - 1] === 0x0a) value = value.subarray(0, value.length - 1);
   if (value.length > 0 && value[value.length - 1] === 0x0d) value = value.subarray(0, value.length - 1);
   if (value.length === 0 || value.includes(0)) {
@@ -108,20 +128,25 @@ function openMember(path, encrypted, migrationId, memberName, passphrase) {
     key = deriveKey(passphrase, salt);
     cipher = createCipheriv('aes-256-gcm', key, nonce);
     cipher.setAAD(aadFor(migrationId, memberName));
-    const header = Buffer.concat([MAGIC, salt, nonce]);
+    const header = Buffer.alloc(HEADER_BYTES);
+    MAGIC.copy(header, 0);
+    salt.copy(header, MAGIC.length);
+    nonce.copy(header, MAGIC.length + SALT_BYTES);
     writeAll(fd, header);
     storedHash.update(header);
   }
   let rowCount = 0;
   let closed = false;
   return {
-    writeRow(row) {
+    writeBytes(bytes) {
       if (closed) throw new Error('Bundle member is already closed.');
-      const bytes = Buffer.from(canonicalJson(row), 'utf8');
-      plaintextHash.update(bytes);
-      let output = bytes;
-      if (cipher) output = cipher.update(bytes);
+      const input = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+      plaintextHash.update(input);
+      const output = cipher ? cipher.update(input) : input;
       if (output.length > 0) { writeAll(fd, output); storedHash.update(output); }
+    },
+    writeRow(row) {
+      this.writeBytes(Buffer.from(canonicalJson(row), 'utf8'));
       rowCount += 1;
     },
     close() {
@@ -147,50 +172,104 @@ function openMember(path, encrypted, migrationId, memberName, passphrase) {
   };
 }
 
-function parseJsonLines(bytes, expectedCount, expectedHash) {
+function createNdjsonValidator(expectedCount, expectedHash) {
   const hash = createHash('sha256');
-  hash.update(bytes);
-  if (hash.digest('hex') !== expectedHash) throw new Error('Plaintext member checksum mismatch.');
-  const text = bytes.toString('utf8');
-  if (text.length > 0 && !text.endsWith('\n')) throw new Error('NDJSON member must end with LF.');
-  const lines = text === '' ? [] : text.slice(0, -1).split('\n');
-  for (const line of lines) {
-    let parsed;
-    try { parsed = JSON.parse(line); } catch { throw new Error('NDJSON member contains invalid JSON.'); }
-    if (canonicalJson(parsed) !== `${line}\n`) throw new Error('NDJSON member is not canonical JSON.');
-  }
-  if (lines.length !== expectedCount) throw new Error('NDJSON row count mismatch.');
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let pending = '';
+  let rowCount = 0;
+  return {
+    feed(bytes) {
+      hash.update(bytes);
+      pending += decoder.decode(bytes, { stream: true });
+      let newline;
+      while ((newline = pending.indexOf('\n')) >= 0) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        let parsed;
+        try { parsed = JSON.parse(line); } catch { throw new Error('NDJSON member contains invalid JSON.'); }
+        if (canonicalJson(parsed) !== `${line}\n`) throw new Error('NDJSON member is not canonical JSON.');
+        rowCount += 1;
+      }
+    },
+    finish() {
+      pending += decoder.decode();
+      if (pending.length > 0) throw new Error('NDJSON member must end with LF.');
+      if (rowCount !== expectedCount) throw new Error('NDJSON row count mismatch.');
+      if (hash.digest('hex') !== expectedHash) throw new Error('Plaintext member checksum mismatch.');
+    },
+  };
 }
 
-function decryptMember(bytes, manifest, member, passphrase) {
-  if (bytes.length < HEADER_BYTES + TAG_BYTES || !bytes.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Encrypted member header is invalid.');
-  const salt = bytes.subarray(MAGIC.length, MAGIC.length + SALT_BYTES);
-  const nonce = bytes.subarray(MAGIC.length + SALT_BYTES, HEADER_BYTES);
-  const ciphertext = bytes.subarray(HEADER_BYTES, bytes.length - TAG_BYTES);
-  const tag = bytes.subarray(bytes.length - TAG_BYTES);
-  let key;
+function copyBuffer(left, right) {
+  const output = Buffer.alloc(left.length + right.length);
+  left.copy(output, 0);
+  right.copy(output, left.length);
+  return output;
+}
+
+function streamFile(path, callback) {
+  const fd = openSync(path, constants.O_RDONLY);
+  const stat = fstatSync(fd);
+  const chunkSize = 64 * 1024;
+  const chunk = Buffer.alloc(chunkSize);
   try {
-    key = deriveKey(passphrase, salt);
-    const decipher = createDecipheriv('aes-256-gcm', key, nonce);
-    decipher.setAAD(aadFor(manifest.migration_id, member.name));
-    decipher.setAuthTag(tag);
-    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    parseJsonLines(plaintext, member.row_count, member.plaintext_sha256);
-    return plaintext;
-  } catch {
-    throw new Error('Encrypted member authentication failed.');
-  } finally {
-    key?.fill(0);
-  }
+    let offset = 0;
+    while (offset < stat.size) {
+      const read = readSync(fd, chunk, 0, Math.min(chunkSize, stat.size - offset), offset);
+      if (read <= 0) throw new Error('Bundle member read made no progress.');
+      callback(chunk.subarray(0, read), offset, stat.size);
+      offset += read;
+    }
+  } finally { closeSync(fd); }
 }
 
-function readMemberRows(path, manifest, member, passphrase) {
-  const bytes = readFileSync(path);
-  if (sha256Hex(bytes) !== member.sha256) throw new Error(`Member checksum mismatch for ${member.name}.`);
-  if (manifest.bundle_mode === 'encrypted') return decryptMember(bytes, manifest, member, passphrase);
-  parseJsonLines(bytes, member.row_count, member.plaintext_sha256);
-  return bytes;
+function verifyStoredMember(path, manifest, member, passphrase) {
+  const storedHash = createHash('sha256');
+  const validator = createNdjsonValidator(member.row_count, member.plaintext_sha256);
+  if (manifest.bundle_mode !== 'encrypted') {
+    streamFile(path, (chunk) => { storedHash.update(chunk); validator.feed(chunk); });
+    validator.finish();
+  } else {
+    const fd = openSync(path, constants.O_RDONLY);
+    const stat = fstatSync(fd);
+    const header = Buffer.alloc(HEADER_BYTES);
+    let headerOffset = 0;
+    let tail = Buffer.alloc(0);
+    let key;
+    try {
+      if (stat.size < HEADER_BYTES + TAG_BYTES || readSync(fd, header, 0, HEADER_BYTES, 0) !== HEADER_BYTES || !header.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Encrypted member header is invalid.');
+      const salt = header.subarray(MAGIC.length, MAGIC.length + SALT_BYTES);
+      const nonce = header.subarray(MAGIC.length + SALT_BYTES, HEADER_BYTES);
+      key = deriveKey(passphrase, salt);
+      const decipher = createDecipheriv('aes-256-gcm', key, nonce);
+      decipher.setAAD(aadFor(manifest.migration_id, member.name));
+      storedHash.update(header);
+      const chunk = Buffer.alloc(64 * 1024);
+      let offset = HEADER_BYTES;
+      while (offset < stat.size) {
+        const read = readSync(fd, chunk, 0, Math.min(chunk.length, stat.size - offset), offset);
+        if (read <= 0) throw new Error('Bundle member read made no progress.');
+        const stored = chunk.subarray(0, read);
+        storedHash.update(stored);
+        const combined = copyBuffer(tail, stored);
+        const processLength = Math.max(0, combined.length - TAG_BYTES);
+        if (processLength > 0) validator.feed(decipher.update(combined.subarray(0, processLength)));
+        tail = Buffer.from(combined.subarray(processLength));
+        offset += read;
+      }
+      if (tail.length !== TAG_BYTES) throw new Error('Encrypted member authentication failed.');
+      decipher.setAuthTag(tail);
+      const finalBytes = decipher.final();
+      if (finalBytes.length > 0) validator.feed(finalBytes);
+      validator.finish();
+    } catch (error) {
+      if (error.message.includes('checksum') || error.message.includes('NDJSON') || error.message.includes('row count')) throw error;
+      throw new Error('Encrypted member authentication failed.');
+    } finally { closeSync(fd); key?.fill(0); }
+  }
+  if (storedHash.digest('hex') !== member.sha256) throw new Error(`Member checksum mismatch for ${member.name}.`);
 }
+
 
 function memberNamesFromManifest(manifest) {
   return manifest.members.map(({ name }) => name);
@@ -201,10 +280,10 @@ function validateBundleDirectory(path) {
   const manifestPath = join(root, 'manifest.json');
   const checksumsPath = join(root, 'checksums.sha256');
   let manifest;
-  try { manifest = JSON.parse(readFileSync(manifestPath, 'utf8')); } catch { throw new Error('Bundle manifest is missing or invalid.'); }
+  try { manifest = JSON.parse(readControlText(manifestPath)); } catch { throw new Error('Bundle manifest is missing or invalid.'); }
   validateManifest(manifest);
   const names = new Set(memberNamesFromManifest(manifest));
-  const expected = new Set(['manifest.json', 'checksums.sha256', ...memberNamesFromManifest(manifest)]);
+  const expected = new Set(['envelope.json', 'manifest.json', 'checksums.sha256', ...memberNamesFromManifest(manifest)]);
   const actual = new Set();
   const walk = (directory, relative = '') => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -218,7 +297,7 @@ function validateBundleDirectory(path) {
   };
   walk(root);
   if (actual.size !== expected.size || [...actual].some((name) => !expected.has(name))) throw new Error('Bundle contains missing or extra members.');
-  const checksumText = readFileSync(checksumsPath, 'utf8');
+  const checksumText = readControlText(checksumsPath);
   if (!checksumText.endsWith('\n') || checksumText.endsWith('\n\n')) throw new Error('Bundle checksum file must have exactly one final LF.');
   const checksumMap = new Map();
   let previousChecksumName = null;
@@ -232,21 +311,23 @@ function validateBundleDirectory(path) {
     previousChecksumName = match[2];
     checksumMap.set(match[2], match[1]);
   }
-  if (checksumMap.size !== expected.size - 1 || checksumMap.has('checksums.sha256') || !checksumMap.has('manifest.json')) throw new Error('Bundle checksum file has missing or extra entries.');
-  if (sha256Hex(readFileSync(manifestPath)) !== checksumMap.get('manifest.json')) throw new Error('Manifest checksum mismatch.');
+  if (checksumMap.size !== expected.size - 1 || checksumMap.has('checksums.sha256') || !checksumMap.has('manifest.json') || !checksumMap.has('envelope.json')) throw new Error('Bundle checksum file has missing or extra entries.');
+  if (sha256Hex(readControlBytes(manifestPath)) !== checksumMap.get('manifest.json')) throw new Error('Manifest checksum mismatch.');
+  const envelopePath = join(root, 'envelope.json');
+  if (sha256Hex(readControlBytes(envelopePath)) !== checksumMap.get('envelope.json')) throw new Error('Envelope checksum mismatch.');
+  let envelope;
+  try { envelope = JSON.parse(readControlText(envelopePath)); } catch { throw new Error('Bundle envelope is invalid.'); }
+  if (envelope?.format_version !== FORMAT_VERSION || envelope.migration_id !== manifest.migration_id || envelope.bundle_mode !== manifest.bundle_mode || envelope.manifest_sha256 !== checksumMap.get('manifest.json')) throw new Error('Bundle envelope does not match the manifest.');
+  const requiredNames = REQUIRED_BUNDLE_ARTIFACTS.map((name) => `${name}${manifest.bundle_mode === 'encrypted' ? '.enc' : ''}`);
+  if (!Array.isArray(envelope.required_artifacts) || envelope.required_artifacts.length !== requiredNames.length || envelope.required_artifacts.some((name, index) => name !== requiredNames[index])) throw new Error('Bundle envelope required artifacts are incomplete.');
   for (const member of manifest.members) {
     if (checksumMap.get(member.name) !== member.sha256) throw new Error(`Manifest checksum does not match ${member.name}.`);
   }
   return { root, manifest };
 }
 
-function catalogTables(catalog, requested) {
-  const all = [...catalog.tables].sort((a, b) => a.name.localeCompare(b.name));
-  if (requested === undefined) return all;
-  if (!Array.isArray(requested) || requested.length === 0 || requested.some((name) => typeof name !== 'string')) throw new TypeError('Bundle tables must be a non-empty array.');
-  const names = new Set(requested);
-  if (names.size !== requested.length || [...names].some((name) => !all.some((table) => table.name === name))) throw new TypeError('Bundle tables must be an allowlisted source table set.');
-  return all.filter((table) => names.has(table.name));
+function catalogTables(catalog) {
+  return [...catalog.tables].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 async function* orderedRows(adapter, table) {
@@ -275,6 +356,7 @@ export async function createBundle({
   allowPlaintextBundle = false,
   acknowledgePlaintextRisk = false,
   tables,
+  passphraseFile,
   env = process.env,
   platform = process.platform,
   secretDecisions = {},
@@ -284,6 +366,7 @@ export async function createBundle({
   if (!adapter || typeof adapter.beginSnapshot !== 'function' || typeof adapter.catalog !== 'function' || typeof adapter.streamTable !== 'function') throw new TypeError('Bundle export requires a source adapter.');
   if (!['postgres', 'sqlite', 'd1-export'].includes(sourceKind)) throw refusal('RMIG-E-SOURCE-ARG', 'export', 'Bundle export requires a supported source kind.');
   if (mode !== 'encrypted' && mode !== 'plaintext') throw refusal('RMIG-E-SOURCE-ARG', 'export', 'Bundle mode must be encrypted or plaintext.');
+  if (tables !== undefined) throw refusal('RMIG-E-SOURCE-ARG', 'export', 'Partial table exports are not supported; export every fingerprinted table.');
   if (mode === 'plaintext' && (allowPlaintextBundle !== true || acknowledgePlaintextRisk !== true)) throw refusal('RMIG-E-BUNDLE-PLAINTEXT-ACK', 'export', 'Plaintext bundles require both explicit acknowledgement flags.');
   if (typeof migrationId !== 'string' || typeof outputPath !== 'string') throw refusal('RMIG-E-SOURCE-ARG', 'export', 'Bundle export requires a migration ID and output path.');
   const destination = resolve(outputPath);
@@ -291,7 +374,13 @@ export async function createBundle({
   if (basename(destination) === '.' || basename(destination) === '..') throw new TypeError('Bundle output must name a directory.');
   if (existsSync(destination)) throw new Error('Bundle output already exists.');
   let passphrase;
-  if (mode === 'encrypted') passphrase = passphraseBytes({ env, platform });
+  if (mode === 'encrypted') passphrase = passphraseBytes({ env, platform, passphraseFile });
+  let secretReview;
+  try { secretReview = normalizeSecretDecisions(secretDecisions, falsePositiveAcknowledgements); }
+  catch (error) { throw refusal('RMIG-E-SECRET-DETECTED', 'export', 'Secret review decisions must be structured and valid.', { reason: error.message }); }
+  const decisionMap = Object.fromEntries(secretReview.decisions.map((item) => [item.review_id, item]));
+  const acknowledgedFalsePositives = secretReview.false_positive_acknowledgements;
+  const seenReviewIds = new Set();
   const incomplete = join(parent, `.${basename(destination)}.${randomBytes(12).toString('hex')}.incomplete`);
   let finalized = false;
   let adapterStarted = false;
@@ -307,8 +396,7 @@ export async function createBundle({
     if (!comparison.match) throw refusal('RMIG-E-SOURCE-FINGERPRINT', 'export', 'The source catalog is not the exact supported v3.2 schema.', { expected_fingerprint: comparison.expectedFingerprint, actual_fingerprint: comparison.actualFingerprint });
     if (sourceFingerprint !== undefined && sourceFingerprint !== comparison.actualFingerprint) throw refusal('RMIG-E-SOURCE-FINGERPRINT', 'export', 'The source fingerprint does not match the exact catalog.', { expected_fingerprint: sourceFingerprint, actual_fingerprint: comparison.actualFingerprint });
     if (sourceReport !== undefined && sourceReport?.details?.actual_fingerprint !== comparison.actualFingerprint) throw refusal('RMIG-E-SOURCE-FINGERPRINT', 'export', 'The source report fingerprint does not match the exact catalog.');
-    const chosenTables = catalogTables(catalog, tables);
-    const acknowledgedFalsePositives = [...falsePositiveAcknowledgements, ...Object.entries(secretDecisions).filter(([, decision]) => decision === 'false-positive').map(([reviewId]) => reviewId)];
+    const chosenTables = catalogTables(catalog);
     const members = [];
     for (const table of chosenTables) {
       const memberName = `data/${table.name}.ndjson${mode === 'encrypted' ? '.enc' : ''}`;
@@ -318,7 +406,10 @@ export async function createBundle({
         for await (const row of orderedRows(adapter, table)) {
           const scan = scanRows([row], { table: table.name, primaryKey: table.primary_key, falsePositiveAcknowledgements: acknowledgedFalsePositives });
           if (scan.highConfidence.length > 0) throw refusal('RMIG-E-SECRET-DETECTED', 'export', 'High-confidence credentials were detected in source metadata or configuration.', { findings: scan.highConfidence.map(({ table: t, column, kind, value_sha256 }) => ({ table: t, column, kind, value_sha256 })) });
-          const decisionResult = applyReviewDecisions(row, scan.reviewItems, secretDecisions);
+          for (const item of scan.reviewItems) seenReviewIds.add(item.review_id);
+          let decisionResult;
+          try { decisionResult = applyReviewDecisions(row, scan.reviewItems, decisionMap); }
+          catch { throw refusal('RMIG-E-SECRET-DETECTED', 'export', 'A lived-content secret review decision is missing or invalid.', { review_ids: scan.reviewItems.map(({ review_id }) => review_id) }); }
           if (!decisionResult.exclude) writer.writeRow(decisionResult.row);
         }
         const result = writer.close();
@@ -328,6 +419,22 @@ export async function createBundle({
         throw error;
       }
     }
+    for (const item of secretReview.decisions) if (!seenReviewIds.has(item.review_id)) throw refusal('RMIG-E-SECRET-DETECTED', 'export', 'A supplied secret review decision did not match a lived-content finding.', { review_id: item.review_id });
+    const persistedSecretReview = { ...secretReview, sha256: secretReviewHash(secretReview) };
+    mkdirSync(join(incomplete, 'external'), { mode: 0o700 });
+    const addArtifact = (relativeName, value) => {
+      const memberName = `${relativeName}${mode === 'encrypted' ? '.enc' : ''}`;
+      const memberPath = join(incomplete, ...memberName.split('/'));
+      const writer = openMember(memberPath, mode === 'encrypted', migrationId, memberName, passphrase);
+      writer.writeBytes(Buffer.from(canonicalJson(value), 'utf8'));
+      const result = writer.close();
+      members.push({ name: memberName, sha256: result.sha256, plaintext_sha256: result.plaintextSha256, row_count: 1 });
+    };
+    addArtifact('source-report.json', sourceReport ?? { format_version: FORMAT_VERSION, migration_id: migrationId, status: 'pending', reason: 'source-report was not supplied to export', source_fingerprint: comparison.actualFingerprint, secret_review_sha256: persistedSecretReview.sha256 });
+    addArtifact('policy-template.json', { format_version: FORMAT_VERSION, migration_id: migrationId, status: 'pending', decisions_required: true, reason: 'policy compilation is a later phase' });
+    addArtifact('external/images.json', { format_version: FORMAT_VERSION, migration_id: migrationId, status: 'pending', reason: 'image inventory and copy are external phases' });
+    addArtifact('external/reembed-jobs.ndjson', { format_version: FORMAT_VERSION, migration_id: migrationId, status: 'pending', reason: 're-embedding is an external phase', legacy_vectors_imported: false });
+    members.sort((left, right) => left.name.localeCompare(right.name));
     const manifest = {
       format_version: FORMAT_VERSION,
       migrator_version: migratorVersion,
@@ -337,6 +444,7 @@ export async function createBundle({
       source_fingerprint: comparison.actualFingerprint,
       bundle_mode: mode,
       plaintext_acknowledgements: { allow_plaintext_bundle: mode === 'plaintext', acknowledge_plaintext_risk: mode === 'plaintext' },
+      secret_review: persistedSecretReview,
       members,
     };
     validateManifest(manifest);
@@ -344,7 +452,18 @@ export async function createBundle({
     const manifestPath = join(incomplete, 'manifest.json');
     const manifestFd = openSync(manifestPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
     try { writeAll(manifestFd, manifestBytes); fsyncSync(manifestFd); } finally { closeSync(manifestFd); }
-    const checksumEntries = [{ name: 'manifest.json', sha256: sha256Hex(manifestBytes) }, ...members.map(({ name, sha256 }) => ({ name, sha256 }))];
+    const envelope = {
+      format_version: FORMAT_VERSION,
+      migration_id: migrationId,
+      manifest_sha256: sha256Hex(manifestBytes),
+      bundle_mode: mode,
+      encryption: mode === 'encrypted' ? { cipher: 'aes-256-gcm', key_derivation: 'scrypt', members_independently_authenticated: true } : null,
+      required_artifacts: REQUIRED_BUNDLE_ARTIFACTS.map((name) => `${name}${mode === 'encrypted' ? '.enc' : ''}`),
+    };
+    const envelopeBytes = Buffer.from(canonicalJson(envelope), 'utf8');
+    const envelopeFd = openSync(join(incomplete, 'envelope.json'), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+    try { writeAll(envelopeFd, envelopeBytes); fsyncSync(envelopeFd); } finally { closeSync(envelopeFd); }
+    const checksumEntries = [{ name: 'envelope.json', sha256: sha256Hex(envelopeBytes) }, { name: 'manifest.json', sha256: sha256Hex(manifestBytes) }, ...members.map(({ name, sha256 }) => ({ name, sha256 }))];
     const checksumBytes = Buffer.from(formatChecksumLines(checksumEntries), 'utf8');
     const checksumFd = openSync(join(incomplete, 'checksums.sha256'), constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
     try { writeAll(checksumFd, checksumBytes); fsyncSync(checksumFd); } finally { closeSync(checksumFd); }
@@ -365,14 +484,14 @@ export async function createBundle({
   }
 }
 
-export function verifyBundle({ path, env = process.env, platform = process.platform } = {}) {
+export function verifyBundle({ path, env = process.env, platform = process.platform, passphraseFile } = {}) {
   let bundle;
   try { bundle = validateBundleDirectory(path); }
   catch (error) { throw refusal('RMIG-E-BUNDLE-INTEGRITY', 'verify-bundle', error.message); }
   let passphrase;
   try {
-    if (bundle.manifest.bundle_mode === 'encrypted') passphrase = passphraseBytes({ env, platform, phase: 'verify-bundle' });
-    for (const member of bundle.manifest.members) readMemberRows(join(bundle.root, ...member.name.split('/')), bundle.manifest, member, passphrase);
+    if (bundle.manifest.bundle_mode === 'encrypted') passphrase = passphraseBytes({ env, platform, phase: 'verify-bundle', passphraseFile });
+    for (const member of bundle.manifest.members) verifyStoredMember(join(bundle.root, ...member.name.split('/')), bundle.manifest, member, passphrase);
     return { ok: true, path: bundle.root, manifest: bundle.manifest };
   } catch (error) {
     if (error instanceof MigrationRefusal) throw error;

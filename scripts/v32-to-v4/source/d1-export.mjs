@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { MigrationRefusal } from '../lib/refusal.mjs';
+import { validateD1Sql } from '../lib/sql-guard.mjs';
 import { assertSourceAdapter } from './adapter.mjs';
 import { SqliteV32Adapter } from './sqlite-v32.mjs';
 
@@ -27,11 +28,12 @@ export function createD1ExportAdapter({ source } = {}) {
   try { sql = readFileSync(exportPath, 'utf8'); }
   catch { throw refusal('RMIG-E-SOURCE-ARG', 'The local D1 SQL export could not be read.', { source_kind: 'd1-export' }); }
   assertNoDirectives(sql);
+  const statements = validateD1Sql(sql);
   const tempDirectory = mkdtempSync(join(tmpdir(), 'rm-d1-materialized-'));
   const materializedPath = join(tempDirectory, 'materialized.sqlite');
   try {
     const database = new DatabaseSync(materializedPath);
-    try { database.exec(sql); } finally { database.close(); }
+    try { for (const statement of statements) database.exec(statement.text); } finally { database.close(); }
     return assertSourceAdapter(new SqliteV32Adapter({ source: materializedPath, allowAnyTables: true, tempDirectory, cleanupTemp: true }));
   } catch (error) {
     try { rmSync(tempDirectory, { recursive: true, force: true }); } catch { /* preserve the original refusal */ }

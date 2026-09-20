@@ -20,9 +20,7 @@ function adapter(rows = [{ id: 2, content: 'second' }, { id: 1, content: 'first'
     catalog() {
       return sourceSpecFor('sqlite');
     },
-    async *streamTable() {
-      for (const row of rows.toSorted((a, b) => a.id - b.id)) yield row;
-    },
+    async *streamTable(table) { if (table === 'observations') for (const row of rows.toSorted((a, b) => a.id - b.id)) yield row; },
   };
 }
 
@@ -32,7 +30,7 @@ function options(root, overrides = {}) {
   return {
     adapter: adapter(), sourceKind: 'sqlite', sourceFingerprint: FP,
     migrationId: MIGRATION_ID, timestamp: TS, migratorVersion: '1.0.0',
-    outputPath: join(root, 'bundle'), tables: ['observations'],
+    outputPath: join(root, 'bundle'),
     env: { ...process.env, RM_MIGRATION_PASSPHRASE_FILE: passphraseFile }, ...overrides,
   };
 }
@@ -41,12 +39,13 @@ describe('streaming migration bundles', () => {
   it('writes deterministic checksummed NDJSON with counts and restrictive modes', async () => {
     const root = mkdtempSync(join(tmpdir(), 'rm-bundle-'));
     const result = await createBundle(options(root));
-    expect(readdirSync(result.path).toSorted()).toEqual(['checksums.sha256', 'data', 'manifest.json']);
+    expect(readdirSync(result.path).toSorted()).toEqual(['checksums.sha256', 'data', 'envelope.json', 'external', 'manifest.json', 'policy-template.json.enc', 'source-report.json.enc']);
+    expect(readdirSync(join(result.path, 'external')).toSorted()).toEqual(['images.json.enc', 'reembed-jobs.ndjson.enc']);
     const manifest = JSON.parse(readFileSync(join(result.path, 'manifest.json'), 'utf8'));
-    expect(manifest.members).toEqual([expect.objectContaining({
+    expect(manifest.members.find(({ name }) => name === 'data/observations.ndjson.enc')).toEqual(expect.objectContaining({
       name: 'data/observations.ndjson.enc', row_count: 2,
       plaintext_sha256: sha256Hex('{"content":"first","id":1}\n{"content":"second","id":2}\n'),
-    })]);
+    }));
     if (process.platform !== 'win32') {
       expect(statSync(join(result.path, 'data')).mode & 0o777).toBe(0o700);
       expect(statSync(join(result.path, 'manifest.json')).mode & 0o777).toBe(0o600);
@@ -82,10 +81,11 @@ describe('streaming migration bundles', () => {
     await expect(createBundle(options(root, { adapter: adapter([lived]), outputPath: join(root, 'refused') }))).rejects.toThrow(/decision|secret|review/i);
     expect(readdirSync(root).filter((name) => name.includes('refused') || name.includes('.incomplete'))).toEqual([]);
     const item = scanRows([lived], { table: 'observations', primaryKey: ['id'] }).reviewItems[0];
+    const decision = { decision: 'retain', reviewed_by: 'test-reviewer', reviewed_at: TS };
     const result = await createBundle(options(root, {
-      adapter: adapter([lived]), outputPath: join(root, 'retained'), secretDecisions: { [item.review_id]: 'retain' },
+      adapter: adapter([lived]), outputPath: join(root, 'retained'), secretDecisions: { [item.review_id]: decision },
     }));
-    expect(result.manifest.members[0].row_count).toBe(1);
+    expect(result.manifest.members.find(({ name }) => name === 'data/observations.ndjson.enc').row_count).toBe(1);
     await expect(createBundle(options(root, {
       adapter: adapter([{ id: 1, config: 'postgres://alice:secret@example.test/mind' }]), outputPath: join(root, 'metadata'),
     }))).rejects.toThrow(/high-confidence|credential|secret/i);
@@ -116,6 +116,6 @@ describe('streaming migration bundles', () => {
     }));
     const manifest = JSON.parse(readFileSync(join(result.path, 'manifest.json'), 'utf8'));
     expect(manifest.bundle_mode).toBe('plaintext');
-    expect(manifest.members[0].name).toBe('data/observations.ndjson');
+    expect(manifest.members.find(({ name }) => name === 'data/observations.ndjson').name).toBe('data/observations.ndjson');
   });
 });
