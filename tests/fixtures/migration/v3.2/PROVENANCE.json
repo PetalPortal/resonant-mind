@@ -1,0 +1,29 @@
+{
+  "tag": "v3.2.0",
+  "files": [
+    {
+      "path": "postgres.sql",
+      "source": "migrations/postgres.sql",
+      "sha256": "78e0bc0c2794232841f19fcf8b0817baffa9ca8097b37f5b4dde9a2d6b37ca90",
+      "bytes": 9488
+    },
+    {
+      "path": "d1/0001_init.sql",
+      "source": "migrations/0001_init.sql",
+      "sha256": "e251a022c224d8248ddb641bc4691015de4c1ec1c76bb05f04d36ef67e5573f5",
+      "bytes": 6174
+    },
+    {
+      "path": "d1/0002_enhanced_memory.sql",
+      "source": "migrations/0002_enhanced_memory.sql",
+      "sha256": "f06977835b1a699b9f8f8b085aefe5d7255b89a84c6f7565ce7b5b989a921cc9",
+      "bytes": 1794
+    },
+    {
+      "path": "d1/0003_graph_health.sql",
+      "source": "migrations/0003_graph_health.sql",
+      "sha256": "bd6cc080cbc3d4851fb97397232a13567934ef80670da18877af7da5164cf6f0",
+      "bytes": 5797
+    }
+  ]
+}
