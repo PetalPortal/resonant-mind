@@ -39,12 +39,12 @@ describe('deterministic policy compilation and transformation', () => {
   it('emits target staging, image inventory, and reembed jobs without legacy vectors', () => {
     const plan = compilePolicy({ bundle: base, decisions: reviewed(base) });
     const transformed = transformRelational({ bundle: base, compiledPolicy: plan });
-    expect(transformed.members.observation_versions.find((row) => row.legacy_id === 2).version_num).toBe(1);
-    expect(transformed.members.observation_versions.find((row) => row.legacy_id === 4).version_num).toBe(2);
+    expect(transformed.members.observation_versions.find((row) => row.id === 2).version_num).toBe(1);
+    expect(transformed.members.observation_versions.find((row) => row.id === 4).version_num).toBe(2);
     expect(transformed.image_inventory.entries[0]).toMatchObject({ source_logical_path: 'objects/Δ.png', expected_size: 3 });
     expect(transformed.reembed_jobs.legacy_vectors_imported).toBe(false);
     expect(transformed.reembed_jobs.jobs.some((job) => job.modality === 'image')).toBe(true);
     expect(canonicalJson(transformed)).not.toContain('[1,2,3]');
-    expect(plan.mapping_tables).toContain('co_surfacing');
+    expect(plan.mapping_tables).toContain('entities');
   });
 });

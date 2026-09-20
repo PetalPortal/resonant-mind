@@ -6,7 +6,7 @@ import { decisionManifestHash, generateDecisionItems, bundleHash } from './gener
 const HASH = /^[0-9a-f]{64}$/u;
 const SAFE_ID = new Set(['string', 'number']);
 const ITEM_REQUIRED = ['decision_id', 'type', 'source_table', 'source_id', 'source_row_sha256', 'reason', 'allowed_choices'];
-const ITEM_OPTIONAL = new Set(['field', 'target_table', 'target_id', 'expected_shape', 'observed_value_sha256', 'collision_ids', 'required_choice_fields', 'review_id']);
+const ITEM_OPTIONAL = new Set(['field', 'target_table', 'target_id', 'expected_shape', 'observed_value_sha256', 'endpoint_sha256', 'collision_ids', 'required_choice_fields', 'review_id']);
 const TOP_KEYS = new Set(['format_version', 'manifest_type', 'migration_id', 'bundle_manifest_sha256', 'reviewed', 'generated_at', 'reviewed_by', 'reviewed_at', 'items', 'manifest_sha256']);
 const WILDCARDS = new Set(['*', 'all', 'accept-all', 'accept_all', 'any', 'unknown']);
 function object(value, label) {
@@ -37,6 +37,19 @@ function choiceValid(choice, item) {
   if (action === 'rename' && (!choice.names || typeof choice.names !== 'object')) throw new TypeError('Rename choices require deterministic names for every source ID.');
   if (action === 'rename' && Array.isArray(item.collision_ids) && item.collision_ids.some((id) => typeof choice.names[String(id)] !== 'string' || choice.names[String(id)].length === 0)) throw new TypeError('Rename choices must provide a final name for every colliding source ID.');
   if (action === 'link-by-reviewed-id' && (choice.target_id === null || choice.target_id === undefined)) throw new TypeError('Reviewed link choices require target_id.');
+  if (Object.hasOwn(item, 'endpoint_sha256') && !HASH.test(item.endpoint_sha256)) throw new TypeError('Endpoint hash is invalid.');
+  const required = item.required_choice_fields?.[action];
+  if (required !== undefined) {
+    if (!Array.isArray(required) || required.some((field) => typeof field !== 'string' || field.length === 0)) throw new TypeError('required_choice_fields is invalid.');
+    for (const field of required) if (!Object.hasOwn(choice, field) || choice[field] === null || choice[field] === undefined || choice[field] === '') throw new TypeError(`Choice ${action} requires ${field}.`);
+  }
+  if (action === 'map-to-person' || action === 'map-to-node') {
+    if (typeof choice.kind !== 'string' || choice.kind.length === 0) throw new TypeError(`${action} choices require a final kind.`);
+  }
+  if (action === 'preserve-visits-and-resolve' || action === 'preserve-visits-and-open') {
+    if (Object.hasOwn(choice, 'last_visited') && typeof choice.last_visited !== 'string') throw new TypeError('Tension last_visited must be text.');
+    if (Object.hasOwn(choice, 'resolved_at') && typeof choice.resolved_at !== 'string') throw new TypeError('Tension resolved_at must be text.');
+  }
 }
 function validateItem(item, index, reviewed) {
   object(item, `items[${index}]`);
@@ -50,6 +63,7 @@ function validateItem(item, index, reviewed) {
   if (!Array.isArray(item.allowed_choices) || item.allowed_choices.length === 0 || new Set(item.allowed_choices).size !== item.allowed_choices.length) throw new TypeError(`items[${index}].allowed_choices must be a non-empty choice list.`);
   for (const choice of item.allowed_choices) { safeText(choice, `items[${index}].allowed_choices`); if (WILDCARDS.has(choice.toLowerCase())) throw new TypeError('Wildcard choices are not supported.'); }
   if (Object.hasOwn(item, 'observed_value_sha256') && !HASH.test(item.observed_value_sha256)) throw new TypeError('Observed value hash is invalid.');
+  if (Object.hasOwn(item, 'endpoint_sha256') && !HASH.test(item.endpoint_sha256)) throw new TypeError('Endpoint hash is invalid.');
   if (Object.hasOwn(item, 'collision_ids') && (!Array.isArray(item.collision_ids) || item.collision_ids.length < 2)) throw new TypeError('Collision IDs must enumerate at least two IDs.');
   if (reviewed) { if (!Object.hasOwn(item, 'choice')) throw new TypeError(`items[${index}] is unresolved.`); choiceValid(item.choice, item); }
   else if (Object.hasOwn(item, 'choice')) throw new TypeError('Draft decision manifests must not contain choices.');
@@ -79,7 +93,7 @@ export function validateDecisionManifest(value, { bundleManifestSha256, expected
       if (expected.size !== ids.size || [...expected].some((id) => !ids.has(id))) throw new TypeError('Reviewed policy has missing or extra decisions.');
       for (const item of value.items) {
         const expectedItem = expectedById.get(item.decision_id);
-        const comparable = (candidate) => ({ type: candidate.type, source_table: candidate.source_table, source_id: candidate.source_id, source_row_sha256: candidate.source_row_sha256, reason: candidate.reason, allowed_choices: candidate.allowed_choices });
+        const comparable = (candidate) => { const copy = { ...candidate }; delete copy.decision_id; delete copy.choice; return copy; };
         if (canonicalJson(comparable(item)) !== canonicalJson(comparable(expectedItem))) throw new TypeError(`Decision ${item.decision_id} is stale or does not match the verified source row.`);
       }
     }

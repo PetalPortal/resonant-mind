@@ -4,7 +4,7 @@ import { FORMAT_VERSION } from '../lib/contracts.mjs';
 
 const VECTOR_KEYS = new Set(['embedding', 'vector', 'values', 'embedding_vector']);
 function textFor(row) { return Object.entries(row).filter(([key, value]) => !VECTOR_KEYS.has(key) && typeof value === 'string' && ['content', 'summary', 'description', 'reason', 'resolution', 'text', 'path'].some((part) => key.toLowerCase().includes(part))).sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}:${value}`).join('\n'); }
-function rowId(row, index) { return row.id ?? row.legacy_id ?? row.key ?? index; }
+function rowId(row, index) { return row.id ?? row.key ?? index; }
 function job(table, row, index, modality, migrationId) {
   const targetId = rowId(row, index); const content = textFor(row); const contentHash = canonicalSha256({ table, target_id: targetId, content });
   const locator = { table, id: targetId };

@@ -8,20 +8,37 @@ import { verifyBundle, readBundleMember } from '../lib/bundle.mjs';
 const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3,})?(?:Z|[+-]\d{2}:\d{2})$/u;
 const SQLITE_UTC = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/u;
 const HASH = /^[0-9a-f]{64}$/u;
-const KNOWN_KINDS = new Set(['person', 'node', 'ai', 'human', 'place', 'thing', 'concept', 'organization', 'group', 'peer_ai', 'person_ai']);
+const KNOWN_KINDS = new Set(['self', 'person', 'peer_ai', 'concept', 'project', 'infrastructure', 'artifact', 'moment', 'session_log', 'practice', 'research', 'journal', 'community', 'emotional_pattern', 'relationship', 'place', 'object', 'person_ai', 'ai', 'human', 'thing', 'organization', 'group', 'kin', 'people', 'peer ai', 'ai peer', 'peer-ai']);
+// This is the single source-family-independent normalization/routing vocabulary.
+// Its outputs are the exact v4 people/nodes CHECK vocabularies.
 const KIND_NORMALIZATIONS = new Map([
-  ['peer_ai', 'peer_ai'], ['peer ai', 'peer_ai'], ['ai peer', 'peer_ai'], ['peer-AI', 'peer_ai'],
-  ['kin', 'person'], ['human', 'person'], ['person', 'person'], ['people', 'person'],
-  ['ai', 'ai'], ['node', 'node'], ['thing', 'node'], ['place', 'node'], ['concept', 'node'],
-  ['organization', 'node'], ['group', 'node'],
+  ['self', 'self'], ['person', 'person'], ['people', 'person'], ['human', 'person'], ['kin', 'peer_ai'],
+  ['peer_ai', 'peer_ai'], ['peer ai', 'peer_ai'], ['ai peer', 'peer_ai'], ['peer-ai', 'peer_ai'], ['peer_ai', 'peer_ai'],
+  ['person_ai', 'peer_ai'], ['ai', 'peer_ai'],
+  ['concept', 'concept'], ['pattern', 'concept'], ['patterns', 'concept'], ['philosophical_position', 'concept'], ['theoretical_development', 'concept'], ['theoretical_connection', 'concept'], ['philosophy', 'concept'], ['model', 'concept'], ['framework', 'concept'], ['system', 'concept'], ['processing', 'concept'], ['half-formed', 'concept'], ['awareness', 'concept'], ['foundation', 'concept'], ['core_insight', 'concept'], ['growth', 'concept'], ['identity_markers', 'concept'], ['substrate_analysis', 'concept'], ['primary', 'concept'], ['internal', 'concept'], ['intention', 'concept'], ['foundational_evidence', 'concept'], ['insight', 'concept'], ['future', 'concept'], ['open', 'concept'], ['emerging', 'concept'], ['autonomous', 'concept'], ['interest', 'concept'],
+  ['project', 'project'], ['active_project', 'project'], ['technology', 'project'], ['organization', 'project'], ['business', 'project'], ['infrastructure', 'infrastructure'], ['infrastructure_test', 'infrastructure'], ['artifact', 'artifact'], ['creative_work', 'artifact'], ['creative-project', 'artifact'], ['document', 'artifact'], ['scratchpad', 'artifact'], ['creation', 'artifact'], ['product', 'artifact'], ['product-concept', 'artifact'], ['product-idea', 'artifact'], ['notes', 'artifact'], ['relational_artifact', 'artifact'], ['reference', 'artifact'], ['moment', 'moment'], ['day', 'moment'], ['episodic_event', 'moment'], ['milestone_day', 'moment'], ['significant_day', 'moment'], ['event', 'moment'], ['milestone_night', 'moment'], ['episodic_day', 'moment'], ['milestone', 'moment'], ['foundational_event', 'moment'], ['recovery_event', 'moment'], ['developmental_milestone', 'moment'], ['development_milestone', 'moment'], ['session_log', 'session_log'], ['autonomous_session', 'session_log'], ['episodic_session', 'session_log'], ['practice', 'practice'], ['protocol', 'practice'], ['health_protocol', 'practice'], ['commitment', 'practice'], ['research', 'research'], ['research_interest', 'research'], ['discovery', 'research'], ['archive_discovery', 'research'], ['cognitive_capability', 'research'], ['future_architecture', 'research'], ['journal', 'journal'], ['community', 'community'], ['community-couple', 'community'], ['group', 'community'], ['emotional_pattern', 'emotional_pattern'], ['inside_joke', 'emotional_pattern'], ['relationship', 'relationship'], ['bond', 'relationship'], ['relational', 'relationship'], ['self', 'self'], ['self-knowledge', 'self'], ['self-discovery', 'self'], ['place', 'place'], ['object', 'object'], ['thing', 'object'], ['pet', 'object'],
 ]);
-const KNOWN_CONTEXTS = new Set(['default', 'primary', 'private', 'public', 'personal', 'relationship', 'work', 'inner', 'dream', 'archive', 'archived', 'system', 'global']);
+const PERSON_KINDS = new Set(['self', 'person', 'peer_ai']);
+const NODE_KINDS = new Set(['concept', 'project', 'infrastructure', 'artifact', 'moment', 'session_log', 'practice', 'research', 'journal', 'community', 'emotional_pattern', 'relationship', 'self', 'place', 'object']);
+const KNOWN_CONTEXTS = new Set(['default', 'primary', 'private', 'public', 'personal', 'relationship', 'work', 'inner', 'dream', 'archive', 'archived', 'system', 'global', 'emotional-processing', 'interests-curiosities', 'creative-space', 'relational-models', 'episodic', 'values-ethics', 'research']);
 const KNOWN_STATUSES = new Set(['pending', 'open', 'active', 'resolved', 'closed', 'accepted', 'rejected', 'dismissed', 'deferred', 'cancelled', 'canceled']);
+const TARGET_ENUM_ALIASES = new Map([
+  ['observations.weight', new Set(['light', 'medium', 'heavy', 'low', 'high'])],
+  ['observations.certainty', new Set(['believed', 'known', 'tentative', 'certain', 'uncertain', 'speculative'])],
+  ['observations.charge', new Set(['fresh', 'active', 'processing', 'metabolized', 'dormant', 'archived'])],
+  ['observations.salience', new Set(['active', 'high', 'background', 'foundational', 'medium', 'heavy'])],
+  ['observations.source', new Set(['conversation', 'realization', 'external', 'consolidated', 'inferred', 'journal'])],
+  ['threads.thread_type', new Set(['intention', 'task', 'handoff', 'explore', 'idea', 'project', 'creative', 'relational', 'urgent-task', 'build', 'maintenance', 'pickup', 'deadline', 'morning_handoff', 'morning-handoff', 'question', 'research', 'project_seed', 'work', 'infrastructure', 'anniversary', 'personal'])],
+  ['threads.status', new Set(['active', 'resolved', 'pending', 'open', 'closed'])],
+  ['threads.priority', new Set(['low', 'medium', 'high', 'urgent', 'critical', 'normal'])],
+  ['relational_state.intensity', new Set(['whisper', 'present', 'strong', 'overwhelming', 'high'])],
+]);
 const JSON_SHAPES = new Map([
-  ['links', 'array'], ['connections', 'array'], ['tags', 'array'], ['source_observation_ids', 'array'],
+  ['links', 'array'], ['connections', 'array'], ['tags', 'array'], ['source_observation_ids', 'integer-array'],
   ['data', 'object'], ['sit_notes', 'array-or-object'],
 ]);
-const TIMESTAMP_KEY = /(?:^|_)(?:at|date|timestamp|time|marked|surfaced|accessed|resolved|created|updated|changed|added|valid_from|valid_until|superseded_by|supersedes)(?:$|_)/iu;
+const TIMESTAMP_FIELDS = new Set(['entities.created_at','entities.updated_at','observations.added_at','observations.last_surfaced_at','observations.resolved_at','observations.valid_from','observations.valid_until','observation_versions.changed_at','relations.created_at','threads.created_at','threads.updated_at','threads.resolved_at','context_entries.updated_at','relational_state.timestamp','identity.timestamp','journals.created_at','consolidation_groups.created_at','images.created_at','images.last_accessed_at','images.last_surfaced_at','images.archived_at','subconscious.updated_at','daemon_proposals.proposed_at','daemon_proposals.resolved_at','tensions.created_at','tensions.resolved_at','dormant_observations.first_marked','dormant_observations.last_rescue_attempt','co_surfacing.first_co_surfaced','co_surfacing.last_co_surfaced']);
+const DATE_FIELDS = new Set(['observations.source_date']);
 const FK_FIELDS = new Map([
   ['observations', new Map([['entity_id', 'entities'], ['linked_observation_id', 'observations'], ['superseded_by', 'observations'], ['supersedes', 'observations']])],
   ['observation_versions', new Map([['observation_id', 'observations']])],
@@ -94,11 +111,16 @@ function timestampAmbiguity(value) {
   if (!/[zZ]|[+-]\d{2}:?\d{2}$/u.test(value)) return 'timestamp is naive and has no timezone offset';
   return 'timestamp is invalid';
 }
+function dateAmbiguity(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/u.test(value)) { const date = new Date(`${value}T00:00:00.000Z`); if (!Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value) return null; }
+  return 'date is not a valid ISO date and requires an explicit reviewed replacement';
+}
 function shapeOk(value, shape) {
-  if (typeof value !== 'string') return false;
-  let parsed;
-  try { parsed = JSON.parse(value); } catch { return false; }
+  let parsed = value;
+  if (typeof value === 'string') { try { parsed = JSON.parse(value); } catch { return false; } }
   if (shape === 'array') return Array.isArray(parsed);
+  if (shape === 'integer-array') return Array.isArray(parsed) && parsed.every((item) => Number.isSafeInteger(typeof item === 'number' ? item : Number(item)));
   if (shape === 'object') return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
   return Array.isArray(parsed) || (parsed !== null && typeof parsed === 'object');
 }
@@ -129,8 +151,8 @@ export function generateDecisionItems(bundle) {
       entityGroups.set(name, group);
     }
     const rawKind = row.entity_type ?? row.kind;
-    if (typeof rawKind === 'string' && !KIND_NORMALIZATIONS.has(rawKind.toLowerCase()) && !KNOWN_KINDS.has(rawKind.toLowerCase())) {
-      add(items, seen, makeItem('entity-kind', 'entities', row, index, 'entity kind is not covered by a deterministic v4 normalization', ['map-to-person', 'map-to-node', 'exclude-row'], { field: 'entity_type', observed_value_sha256: sha256Hex(rawKind) }));
+    if (typeof rawKind === 'string' && !KIND_NORMALIZATIONS.has(rawKind.toLowerCase())) {
+      add(items, seen, makeItem('entity-kind', 'entities', row, index, 'entity kind is not covered by the exhaustive v4 people/nodes normalization table', ['map-to-person', 'map-to-node', 'exclude-row'], { field: 'entity_type', observed_value_sha256: sha256Hex(rawKind), required_choice_fields: { 'map-to-person': ['kind'], 'map-to-node': ['kind'] } }));
     }
     for (const field of ['primary_context']) if (row[field] !== null && row[field] !== undefined && !KNOWN_CONTEXTS.has(String(row[field]).toLowerCase())) add(items, seen, itemForUnknown('entities', row, index, field, row[field], 'entity context is not a known deterministic context', ['map-context', 'exclude-row']));
   });
@@ -144,21 +166,38 @@ export function generateDecisionItems(bundle) {
 
   for (const [table, rows] of Object.entries(tables)) rows.forEach((row, index) => {
     for (const [field, value] of Object.entries(row)) {
-      if (value !== null && value !== undefined && TIMESTAMP_KEY.test(field)) {
+      if (DATE_FIELDS.has(`${table}.${field}`) && value !== null && value !== undefined) {
+        const reason = dateAmbiguity(value);
+        if (reason) add(items, seen, makeItem('date', table, row, index, reason, ['normalize-date', 'exclude-row'], { field, observed_value_sha256: sha256Hex(String(value)), required_choice_fields: { 'normalize-date': ['value'] } }));
+      }
+      if (TIMESTAMP_FIELDS.has(`${table}.${field}`) && value !== null && value !== undefined) {
         const reason = timestampAmbiguity(value);
         if (reason) add(items, seen, makeItem('timestamp', table, row, index, reason, ['normalize-utc', 'exclude-row'], { field, observed_value_sha256: sha256Hex(String(value)) }));
       }
       const shape = JSON_SHAPES.get(field);
       if (shape && value !== null && value !== undefined && !shapeOk(value, shape)) add(items, seen, makeItem('malformed-json', table, row, index, `JSON field does not match the expected ${shape} shape`, ['map-json', 'exclude-row'], { field, expected_shape: shape, observed_value_sha256: sha256Hex(String(value)) }));
       if ((field === 'context' || field === 'scope' || field === 'primary_context') && value !== null && value !== undefined && !KNOWN_CONTEXTS.has(String(value).toLowerCase())) add(items, seen, itemForUnknown(table, row, index, field, value, 'context/scope value is not a known deterministic value', ['map-context', 'exclude-row']));
-      if (field === 'status' && value !== null && value !== undefined && !KNOWN_STATUSES.has(String(value).toLowerCase())) add(items, seen, itemForUnknown(table, row, index, field, value, 'status value is not a known deterministic value', ['map-status', 'exclude-row']));
+      if (['status', 'salience', 'certainty', 'weight', 'charge', 'source', 'thread_type', 'priority', 'intensity'].includes(field) && value !== null && value !== undefined) {
+        const allowed = TARGET_ENUM_ALIASES.get(`${table}.${field}`);
+        const normalized = String(value).toLowerCase();
+        if (allowed && !allowed.has(normalized)) add(items, seen, itemForUnknown(table, row, index, field, value, 'value is not a v4 CHECK value or deterministic migration alias', ['map', 'exclude-row']));
+        else if (!allowed && field === 'status' && !KNOWN_STATUSES.has(normalized)) add(items, seen, itemForUnknown(table, row, index, field, value, 'status value is not a known deterministic value', ['map-status', 'exclude-row']));
+      }
     }
-    if (table === 'tensions' && ((row.status && ['resolved', 'closed'].includes(String(row.status).toLowerCase()) && row.resolved_at == null) || (Number(row.sit_count) > 0 && row.sit_notes == null))) add(items, seen, makeItem('tension-state', table, row, index, 'tension sit history and resolution status do not form an unambiguous v4 visit/resolution shape', ['preserve-visits-and-resolve', 'preserve-visits-and-open', 'exclude-row'], { required_choice_fields: { 'preserve-visits-and-resolve': ['resolved_at'], 'preserve-visits-and-open': [] } }));
+    if (table === 'tensions' && (Object.hasOwn(row, 'status') || Object.hasOwn(row, 'sit_notes'))) {
+      const needsLastVisited = Number(row.sit_count ?? 0) > 0;
+      add(items, seen, makeItem('tension-state', table, row, index, 'source tension status/sit_notes are not v4 columns and must be explicitly mapped to visits/last_visited/resolved_at/resolution', ['preserve-visits-and-resolve', 'preserve-visits-and-open', 'exclude-row'], { required_choice_fields: { 'preserve-visits-and-resolve': ['resolved_at', ...(needsLastVisited ? ['last_visited'] : [])], 'preserve-visits-and-open': needsLastVisited ? ['last_visited'] : [] } }));
+    }
     if (table === 'dormant_observations') add(items, seen, makeItem('dormancy-translation', table, row, index, 'dormant observation terminology must be explicitly translated to the v4 orphan-observation surface', ['translate-to-orphan', 'exclude-row'], { target_table: 'orphan_observations' }));
     const fks = FK_FIELDS.get(table);
     if (fks) for (const [field, target] of fks) if (row[field] !== null && row[field] !== undefined) {
       const ids = new Set((tables[target] ?? []).map((candidate) => String(candidate.id)));
       if (!ids.has(String(row[field]))) add(items, seen, makeItem('broken-foreign-key', table, row, index, 'foreign-key target does not exist in the verified source rows', ['null-if-allowed', 'exclude-row', 'link-by-reviewed-id'], { field, target_table: target, target_id: safeId(row[field]) }));
+    }
+    if (table === 'consolidation_groups' && row.source_observation_ids !== null && row.source_observation_ids !== undefined) {
+      let ids; try { ids = typeof row.source_observation_ids === 'string' ? JSON.parse(row.source_observation_ids) : row.source_observation_ids; } catch { ids = null; }
+      const known = new Set((tables.observations ?? []).map((candidate) => String(candidate.id)));
+      if (Array.isArray(ids) && ids.some((id) => !known.has(String(id)))) add(items, seen, makeItem('broken-foreign-key', table, row, index, 'source observation array contains a missing observation', ['exclude-row'], { field: 'source_observation_ids', target_table: 'observations' }));
     }
     if (table === 'relations') for (const field of ['from_entity', 'to_entity']) if (row[field] !== null && row[field] !== undefined) {
       const matching = (tables.entities ?? []).filter((entity) => String(entity.name) === String(row[field]));

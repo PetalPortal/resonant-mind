@@ -23,7 +23,7 @@ function readBundle(path, passphraseFile) {
     tables[member.name.slice(5).replace(/\.ndjson(?:\.enc)?$/u, '')] = data.split('\n').filter(Boolean).map((line) => JSON.parse(line));
   }
   const envelope = JSON.parse(readFileSync(join(path, 'envelope.json'), 'utf8'));
-  return { tables, migration_id: verified.manifest.migration_id, bundle_manifest_sha256: envelope.manifest_sha256, manifest: verified.manifest };
+  return { tables, source_kind: verified.manifest.source_kind, migration_id: verified.manifest.migration_id, bundle_manifest_sha256: envelope.manifest_sha256, manifest: verified.manifest };
 }
 export function parseCompilePolicyArgs(argv) { return parseFlags(argv); }
 export function compilePolicyCommand({ bundlePath, decisionsPath, outPath, passphraseFile }) {
