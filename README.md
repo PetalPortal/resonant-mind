@@ -19,6 +19,8 @@ This is **v4.0.0 — the Reshape release**.
 - no hard-coded person or household tenancy
 
 > **Upgrade warning:** The migration runner currently supports fresh v4 databases. It deliberately refuses an existing untracked v3 schema. Back up v3 installations and wait for the reviewed v3.2→v4 expand/backfill/validate/contract migration before upgrading in place.
+>
+> **Operator-assisted migration candidate:** The complete, fail-closed scope is documented in the [User migration guide](USER_MIGRATION_GUIDE.md) and [Agent migration runbook](AGENT_MIGRATION_RUNBOOK.md). These documents do not promise a release, support, automatic external phases, or automatic cutover.
 
 ## Architecture
 
