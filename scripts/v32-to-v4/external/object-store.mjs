@@ -31,7 +31,7 @@ export class ExternalReceiptObjectStore extends ObjectStore {
 
 export class R2ObjectStore extends ObjectStore {
   constructor() { super(); }
-  refuse() { throw new MigrationRefusal({ code: 'RMIG-E-IMAGE-INCOMPLETE', phase: 'copy-images', summary: 'Release one does not access R2 directly; provide an external signed inventory/copy receipt.', safe_details: { adapter: 'r2', guide: 'docs/migration-from-mind-cloud.md' }, report_path: null }); }
+  refuse() { throw new MigrationRefusal({ code: 'RMIG-E-IMAGE-INCOMPLETE', phase: 'copy-images', summary: 'Release one does not access R2 directly; provide an external signed inventory/copy receipt. See docs/migration-from-mind-cloud.md.', safe_details: { adapter: 'r2', guide: 'docs/migration-from-mind-cloud.md' }, report_path: null }); }
   async inventory() { this.refuse(); }
   async openRead() { this.refuse(); }
   async put() { this.refuse(); }
