@@ -51,7 +51,7 @@
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('co_surfacing_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -60,7 +60,7 @@
       ],
       "unique_constraints": [
         {
-          "name": "co_surfacing_unique_1",
+          "name": "co_surfacing_obs_a_id_obs_b_id_key",
           "unique": true,
           "columns": [
             "obs_a_id",
@@ -101,6 +101,23 @@
       ],
       "checks": [],
       "indexes": [
+        {
+          "name": "co_surfacing_obs_a_id_obs_b_id_key",
+          "unique": true,
+          "columns": [
+            "obs_a_id",
+            "obs_b_id"
+          ],
+          "where": null
+        },
+        {
+          "name": "co_surfacing_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        },
         {
           "name": "idx_co_surfacing_count",
           "unique": false,
@@ -162,7 +179,7 @@
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('consolidation_groups_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -203,6 +220,14 @@
       "checks": [],
       "indexes": [
         {
+          "name": "consolidation_groups_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        },
+        {
           "name": "idx_consolidation_entity",
           "unique": false,
           "columns": [
@@ -226,7 +251,7 @@
           "name": "links",
           "type": "text",
           "nullable": true,
-          "default": "'[]'",
+          "default": "'[]'::text",
           "pk_position": 0
         },
         {
@@ -258,6 +283,14 @@
       "foreign_keys": [],
       "checks": [],
       "indexes": [
+        {
+          "name": "context_entries_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        },
         {
           "name": "idx_context_scope",
           "unique": false,
@@ -324,7 +357,7 @@
           "name": "status",
           "type": "text",
           "nullable": true,
-          "default": "'pending'",
+          "default": "'pending'::text",
           "pk_position": 0
         },
         {
@@ -345,7 +378,7 @@
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('daemon_proposals_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -414,6 +447,14 @@
       "checks": [],
       "indexes": [
         {
+          "name": "daemon_proposals_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        },
+        {
           "name": "idx_daemon_proposals_status",
           "unique": false,
           "columns": [
@@ -466,7 +507,7 @@
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('dormant_observations_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -502,6 +543,22 @@
       "checks": [],
       "indexes": [
         {
+          "name": "dormant_observations_observation_id_key",
+          "unique": true,
+          "columns": [
+            "observation_id"
+          ],
+          "where": null
+        },
+        {
+          "name": "dormant_observations_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        },
+        {
           "name": "idx_dormant_observation",
           "unique": false,
           "columns": [
@@ -532,7 +589,7 @@
           "name": "metadata",
           "type": "jsonb",
           "nullable": true,
-          "default": "'{}'",
+          "default": "'{}'::jsonb",
           "pk_position": 0
         },
         {
@@ -565,6 +622,14 @@
       "checks": [],
       "indexes": [
         {
+          "name": "embeddings_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        },
+        {
           "name": "idx_embeddings_source",
           "unique": false,
           "columns": [
@@ -581,8 +646,8 @@
           ],
           "where": null,
           "method": "ivfflat",
-          "options": "lists = 100",
-          "opclass": "vector_cosine_ops"
+          "opclass": "vector_cosine_ops",
+          "options": "lists = '100'"
         }
       ]
     },
@@ -621,14 +686,14 @@
           "name": "primary_context",
           "type": "text",
           "nullable": false,
-          "default": "'default'",
+          "default": "'default'::text",
           "pk_position": 0
         },
         {
           "name": "salience",
           "type": "text",
           "nullable": true,
-          "default": "'active'",
+          "default": "'active'::text",
           "pk_position": 0
         },
         {
@@ -642,7 +707,7 @@
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('entities_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -651,7 +716,7 @@
       ],
       "unique_constraints": [
         {
-          "name": "entities_unique_1",
+          "name": "entities_name_primary_context_key",
           "unique": true,
           "columns": [
             "name",
@@ -663,6 +728,23 @@
       "foreign_keys": [],
       "checks": [],
       "indexes": [
+        {
+          "name": "entities_name_primary_context_key",
+          "unique": true,
+          "columns": [
+            "name",
+            "primary_context"
+          ],
+          "where": null
+        },
+        {
+          "name": "entities_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        },
         {
           "name": "idx_entities_context",
           "unique": false,
@@ -704,7 +786,7 @@
           "name": "connections",
           "type": "text",
           "nullable": true,
-          "default": "'[]'",
+          "default": "'[]'::text",
           "pk_position": 0
         },
         {
@@ -739,7 +821,7 @@
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('identity_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -750,6 +832,14 @@
       "foreign_keys": [],
       "checks": [],
       "indexes": [
+        {
+          "name": "identity_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        },
         {
           "name": "idx_identity_section",
           "unique": false,
@@ -858,14 +948,14 @@
           "name": "weight",
           "type": "text",
           "nullable": true,
-          "default": "'medium'",
+          "default": "'medium'::text",
           "pk_position": 0
         },
         {
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('images_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -912,6 +1002,14 @@
             "entity_id"
           ],
           "where": null
+        },
+        {
+          "name": "images_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
         }
       ]
     },
@@ -950,21 +1048,21 @@
           "name": "journal_type",
           "type": "text",
           "nullable": true,
-          "default": "'entry'",
+          "default": "'entry'::text",
           "pk_position": 0
         },
         {
           "name": "tags",
           "type": "text",
           "nullable": true,
-          "default": "'[]'",
+          "default": "'[]'::text",
           "pk_position": 0
         },
         {
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('journals_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -988,6 +1086,14 @@
           "unique": false,
           "columns": [
             "journal_type"
+          ],
+          "where": null
+        },
+        {
+          "name": "journals_pkey",
+          "unique": true,
+          "columns": [
+            "id"
           ],
           "where": null
         }
@@ -1035,7 +1141,7 @@
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('observation_versions_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -1060,11 +1166,27 @@
         }
       ],
       "checks": [],
-      "indexes": []
+      "indexes": [
+        {
+          "name": "observation_versions_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        }
+      ]
     },
     {
       "name": "observations",
       "columns": [
+        {
+          "name": "access_count",
+          "type": "integer",
+          "nullable": true,
+          "default": "0",
+          "pk_position": 0
+        },
         {
           "name": "added_at",
           "type": "timestamp with time zone",
@@ -1083,7 +1205,7 @@
           "name": "certainty",
           "type": "text",
           "nullable": true,
-          "default": "'believed'",
+          "default": "'believed'::text",
           "pk_position": 0
         },
         {
@@ -1111,7 +1233,7 @@
           "name": "context",
           "type": "text",
           "nullable": true,
-          "default": "'default'",
+          "default": "'default'::text",
           "pk_position": 0
         },
         {
@@ -1164,10 +1286,17 @@
           "pk_position": 0
         },
         {
+          "name": "resolved_at",
+          "type": "timestamp with time zone",
+          "nullable": true,
+          "default": null,
+          "pk_position": 0
+        },
+        {
           "name": "salience",
           "type": "text",
           "nullable": true,
-          "default": "'active'",
+          "default": "'active'::text",
           "pk_position": 0
         },
         {
@@ -1181,7 +1310,7 @@
           "name": "source",
           "type": "text",
           "nullable": true,
-          "default": "'conversation'",
+          "default": "'conversation'::text",
           "pk_position": 0
         },
         {
@@ -1230,14 +1359,14 @@
           "name": "weight",
           "type": "text",
           "nullable": true,
-          "default": "'medium'",
+          "default": "'medium'::text",
           "pk_position": 0
         },
         {
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('observations_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -1392,6 +1521,14 @@
             "weight"
           ],
           "where": null
+        },
+        {
+          "name": "observations_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
         }
       ]
     },
@@ -1430,7 +1567,7 @@
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('relational_state_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -1446,6 +1583,14 @@
           "unique": false,
           "columns": [
             "person"
+          ],
+          "where": null
+        },
+        {
+          "name": "relational_state_pkey",
+          "unique": true,
+          "columns": [
+            "id"
           ],
           "where": null
         }
@@ -1465,7 +1610,7 @@
           "name": "from_context",
           "type": "text",
           "nullable": true,
-          "default": "'default'",
+          "default": "'default'::text",
           "pk_position": 0
         },
         {
@@ -1486,14 +1631,14 @@
           "name": "store_in",
           "type": "text",
           "nullable": true,
-          "default": "'default'",
+          "default": "'default'::text",
           "pk_position": 0
         },
         {
           "name": "to_context",
           "type": "text",
           "nullable": true,
-          "default": "'default'",
+          "default": "'default'::text",
           "pk_position": 0
         },
         {
@@ -1507,7 +1652,7 @@
           "name": "id",
           "type": "integer",
           "nullable": false,
-          "default": null,
+          "default": "nextval('relations_id_seq'::regclass)",
           "pk_position": 1
         }
       ],
@@ -1517,7 +1662,16 @@
       "unique_constraints": [],
       "foreign_keys": [],
       "checks": [],
-      "indexes": []
+      "indexes": [
+        {
+          "name": "relations_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        }
+      ]
     },
     {
       "name": "subconscious",
@@ -1557,7 +1711,16 @@
       "unique_constraints": [],
       "foreign_keys": [],
       "checks": [],
-      "indexes": []
+      "indexes": [
+        {
+          "name": "subconscious_pkey",
+          "unique": true,
+          "columns": [
+            "id"
+          ],
+          "where": null
+        }
+      ]
     },
     {
       "name": "tensions",
@@ -1615,14 +1778,14 @@
           "name": "sit_notes",
           "type": "text",
           "nullable": true,
-          "default": "'[]'",
+          "default": "'[]'::text",
           "pk_position": 0
         },
         {
           "name": "status",
           "type": "text",
           "nullable": true,
-          "default": "'active'",
+          "default": "'active'::text",
           "pk_position": 0
         },
         {
@@ -1645,6 +1808,14 @@
           "unique": false,
           "columns": [
             "status"
+          ],
+          "where": null
+        },
+        {
+          "name": "tensions_pkey",
+          "unique": true,
+          "columns": [
+            "id"
           ],
           "where": null
         }
@@ -1678,7 +1849,7 @@
           "name": "priority",
           "type": "text",
           "nullable": true,
-          "default": "'medium'",
+          "default": "'medium'::text",
           "pk_position": 0
         },
         {
@@ -1699,14 +1870,14 @@
           "name": "source",
           "type": "text",
           "nullable": true,
-          "default": "'self'",
+          "default": "'self'::text",
           "pk_position": 0
         },
         {
           "name": "status",
           "type": "text",
           "nullable": true,
-          "default": "'active'",
+          "default": "'active'::text",
           "pk_position": 0
         },
         {
@@ -1743,6 +1914,14 @@
           "unique": false,
           "columns": [
             "status"
+          ],
+          "where": null
+        },
+        {
+          "name": "threads_pkey",
+          "unique": true,
+          "columns": [
+            "id"
           ],
           "where": null
         }

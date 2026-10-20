@@ -16,7 +16,13 @@ const TABLES = new Set(sourceSpecFor('postgres').tables.map(({ name }) => name))
 // the same instant in RFC 3339 with nothing rounded, and a naive timestamp or a date stays as
 // PostgreSQL wrote it, for the reviewed policy to decide.
 const OID = Object.freeze({ date: 1082, timestamp: 1114, timestamptz: 1184 });
-export const SOURCE_SESSION_OPTIONS = '-c TimeZone=UTC -c DateStyle=ISO,YMD';
+// search_path is pinned for the same reason: pg_get_expr, pg_get_indexdef and format_type print an
+// object's schema whenever it is not visible on the session's search_path, so a role or database
+// with its own search_path setting would otherwise change the catalog text (for example a serial
+// default becoming nextval('public.t_id_seq'::regclass)) without the schema being any different.
+// With public pinned, the text is a function of the catalog alone, and an exact comparison does not
+// need to rewrite any of it.
+export const SOURCE_SESSION_OPTIONS = '-c TimeZone=UTC -c DateStyle=ISO,YMD -c search_path=public';
 
 /** PostgreSQL's ISO timestamptz text as RFC 3339, digit for digit; anything else is returned as it was. */
 export function rfc3339FromPostgres(text) {
@@ -67,8 +73,14 @@ function qualifiedTable(value) {
   return `${quoteIdentifier(SCHEMA)}.${quoteIdentifier(value)}`;
 }
 
+// pg_constraint.confdeltype / confupdtype: a = NO ACTION, r = RESTRICT, c = CASCADE, n = SET NULL,
+// d = SET DEFAULT. The first version of this table read n (SET NULL) as NO ACTION and any unknown
+// code as NO ACTION, so a foreign key that nulls its column would have compared equal to one that
+// does not. An unknown code is refused instead.
 function actionName(value) {
-  return ({ c: 'CASCADE', n: 'NO ACTION', r: 'RESTRICT', a: 'NO ACTION', d: 'SET DEFAULT', })[value] ?? 'NO ACTION';
+  const name = ({ a: 'NO ACTION', r: 'RESTRICT', c: 'CASCADE', n: 'SET NULL', d: 'SET DEFAULT' })[value];
+  if (name === undefined) throw refusal('RMIG-E-SOURCE-DRIFT', 'PostgreSQL reported a foreign-key action this migrator does not know.', { action_code: String(value) });
+  return name;
 }
 
 function matchingParen(text, start) {
@@ -144,7 +156,7 @@ export function parseIndexDefinition(definition) {
   return { columns, expressions, opclass, where: whereMatch?.[1]?.trim() ?? null, options };
 }
 
-function buildCatalog(columnRows, constraintRows, checkRows, indexRows) {
+export function buildPostgresCatalog(columnRows, constraintRows, checkRows, indexRows) {
   const tables = new Map();
   const table = (name) => {
     if (!tables.has(name)) tables.set(name, { name, columns: [], primary_key: [], unique_constraints: [], foreign_keys: [], checks: [], indexes: [] });
@@ -241,7 +253,7 @@ export class PostgresV32Adapter {
       this.#query(POSTGRES_CATALOG_QUERIES.checks, [SCHEMA]),
       this.#query(POSTGRES_CATALOG_QUERIES.indexes, [SCHEMA]),
     ]);
-    return buildCatalog(columns.rows, constraints.rows, checks.rows, indexes.rows);
+    return buildPostgresCatalog(columns.rows, constraints.rows, checks.rows, indexes.rows);
   }
 
   async beginSnapshot() {
