@@ -14,8 +14,10 @@ const TABLES = new Set(sourceSpecFor('postgres').tables.map(({ name }) => name))
 // away and are not plain data for the bundle's canonical JSON. The source keeps PostgreSQL's own
 // text instead: the session is UTC with ISO dates (SOURCE_SESSION_OPTIONS), a timestamptz becomes
 // the same instant in RFC 3339 with nothing rounded, and a naive timestamp or a date stays as
-// PostgreSQL wrote it, for the reviewed policy to decide.
-const OID = Object.freeze({ date: 1082, timestamp: 1114, timestamptz: 1184 });
+// PostgreSQL wrote it, for the reviewed policy to decide. json and jsonb (embeddings.metadata)
+// would be parsed into JavaScript objects, which are not plain row data either; they stay as the
+// text PostgreSQL printed, so the bundle holds exactly what the database held.
+const OID = Object.freeze({ json: 114, jsonb: 3802, date: 1082, timestamp: 1114, timestamptz: 1184 });
 // search_path is pinned for the same reason: pg_get_expr, pg_get_indexdef and format_type print an
 // object's schema whenever it is not visible on the session's search_path, so a role or database
 // with its own search_path setting would otherwise change the catalog text (for example a serial
@@ -38,7 +40,7 @@ function sourceTypes() {
   return {
     getTypeParser(oid, format) {
       if (oid === OID.timestamptz) return rfc3339FromPostgres;
-      if (oid === OID.timestamp || oid === OID.date) return (value) => value;
+      if (oid === OID.timestamp || oid === OID.date || oid === OID.json || oid === OID.jsonb) return (value) => value;
       return types.getTypeParser(oid, format);
     },
   };
