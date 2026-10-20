@@ -1,3 +1,4 @@
+import net from 'node:net';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { POSTGRES_CATALOG_QUERIES, createPostgresV32Adapter } from '../../scripts/v32-to-v4/source/postgres-v32.mjs';
@@ -27,7 +28,9 @@ async function readEverything(url) {
       rows[table.name] = [];
       for await (const row of adapter.streamTable(table.name, table.primary_key)) rows[table.name].push(row);
     }
-    return { catalog, rows, counts: Object.fromEntries(await Promise.all(catalog.tables.map(async ({ name }) => [name, await adapter.rowCount(name)]))) };
+    const counts = {};
+    for (const { name } of catalog.tables) counts[name] = await adapter.rowCount(name);
+    return { catalog, rows, counts };
   } finally {
     await adapter.endSnapshot();
     await adapter.close();
@@ -82,6 +85,73 @@ describe.skipIf(!hasAdminDatabase)('PostgreSQL source reads do not depend on the
       const reread = new Client({ connectionString: url });
       await reread.connect();
       try { expect((await reread.query("SELECT current_setting('TimeZone') AS tz")).rows[0].tz).toBe('Asia/Kolkata'); } finally { await reread.end(); }
+    });
+  }, 120_000);
+});
+
+// A stand-in for what a transaction-mode pooler does to a connection that sends a startup `options`
+// parameter: PgBouncer answers "unsupported startup parameter: options" and closes. Everything else is
+// passed through untouched, so authentication and queries are the real server's.
+function startOptionsRejectingProxy(targetUrl) {
+  const target = new URL(targetUrl);
+  const log = { rejected: 0, accepted: 0 };
+  const server = net.createServer((client) => {
+    let buffered = Buffer.alloc(0);
+    let upstream = null;
+    client.on('error', () => {});
+    client.on('data', (chunk) => {
+      if (upstream) { upstream.write(chunk); return; }
+      buffered = Buffer.concat([buffered, chunk]);
+      if (buffered.length < 8) return;
+      const length = buffered.readInt32BE(0);
+      if (buffered.length < length) return;
+      const names = buffered.subarray(8, length).toString('utf8').split('\0').filter((_value, index) => index % 2 === 0);
+      if (names.includes('options')) {
+        log.rejected += 1;
+        const fields = Buffer.from('SFATAL\0C08P01\0Munsupported startup parameter: options\0\0');
+        const message = Buffer.alloc(5 + fields.length);
+        message.write('E', 0); message.writeInt32BE(4 + fields.length, 1); fields.copy(message, 5);
+        client.end(message);
+        return;
+      }
+      log.accepted += 1;
+      upstream = net.connect(Number(target.port || 5432), target.hostname);
+      upstream.on('error', () => client.destroy());
+      upstream.on('data', (data) => client.write(data));
+      upstream.on('close', () => client.end());
+      upstream.write(buffered);
+    });
+    client.on('close', () => upstream?.destroy());
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => {
+    const url = new URL(targetUrl);
+    url.hostname = '127.0.0.1';
+    url.port = String(server.address().port);
+    url.searchParams.set('sslmode', 'disable');
+    resolve({ url: url.toString(), log, close: () => new Promise((done) => server.close(done)) });
+  }));
+}
+
+describe.skipIf(!hasAdminDatabase)('PostgreSQL source through a pooler that refuses startup options (TEST_ADMIN_DATABASE_URL)', () => {
+  it('reads the identical catalog and rows, where a startup option would have been refused', async () => {
+    await withScratchSource({ seed: (client) => client.query(SEED) }, async (url) => {
+      const direct = await readEverything(url);
+      const proxy = await startOptionsRejectingProxy(url);
+      try {
+        // the old design: session settings as a startup option. The pooler refuses the connection outright.
+        const optioned = new Client({ connectionString: proxy.url, options: '-c TimeZone=UTC -c DateStyle=ISO,YMD -c search_path=public' });
+        await expect(optioned.connect()).rejects.toThrow(/unsupported startup parameter: options/u);
+        expect(proxy.log.rejected).toBe(1);
+        // the adapter now: no startup option, settings set inside the snapshot transaction
+        const viaPooler = await readEverything(proxy.url);
+        expect(viaPooler.catalog).toEqual(direct.catalog);
+        expect(viaPooler.rows).toEqual(direct.rows);
+        expect(viaPooler.counts).toEqual(direct.counts);
+        expect(proxy.log.rejected).toBe(1);
+        expect(proxy.log.accepted).toBeGreaterThan(0);
+      } finally {
+        await proxy.close();
+      }
     });
   }, 120_000);
 });

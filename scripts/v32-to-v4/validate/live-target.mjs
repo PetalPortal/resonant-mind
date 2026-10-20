@@ -49,7 +49,9 @@ export async function readLiveTarget({ client, migrationId, findings }) {
 
     // The released migration set, as the importer binds it.
     let ledger = null;
-    try { ledger = await ledgerBinding(client); } catch (error) { findings.add('target-ledger-mismatch', { reason: error instanceof MigrationRefusal ? error.code : 'ledger-unreadable' }); }
+    const ledgerTable = await client.query("SELECT to_regclass('public.schema_migrations')::text AS name");
+    if (!ledgerTable.rows[0]?.name) findings.add('target-ledger-mismatch', { reason: 'no-migration-ledger' });
+    else { try { ledger = await ledgerBinding(client); } catch (error) { findings.add('target-ledger-mismatch', { reason: error instanceof MigrationRefusal ? error.code : 'ledger-unreadable' }); } }
 
     // Constraints and indexes: nothing may be left unvalidated or invalid.
     const constraints = (await client.query("SELECT c.conname::text AS name, rel.relname::text AS table_name, c.contype::text AS kind, c.convalidated AS validated FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_class rel ON rel.oid = c.conrelid JOIN pg_catalog.pg_namespace n ON n.oid = rel.relnamespace WHERE n.nspname = 'public' AND c.contype IN ('p', 'u', 'f', 'c')")).rows;

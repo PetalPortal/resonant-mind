@@ -190,3 +190,14 @@ describe('a reviewed merge of duplicate entities', () => {
     expect(checksOf(run(leftBehind))).toContain('target-row-without-source');
   });
 });
+
+describe('findings are plain data', () => {
+  it('leave out a detail that is undefined, so a report can always be written', async () => {
+    const { Findings } = await import('../../scripts/v32-to-v4/validate/compare.mjs');
+    const { canonicalJson } = await import('../../scripts/v32-to-v4/lib/canonical-json.mjs');
+    const findings = new Findings();
+    findings.add('observation-version-order', { table: 'observation_versions', observation_id: undefined, row_index: 0 });
+    expect(findings.samples).toEqual([{ check: 'observation-version-order', table: 'observation_versions', row_index: 0 }]);
+    expect(() => canonicalJson(findings.samples)).not.toThrow();
+  });
+});

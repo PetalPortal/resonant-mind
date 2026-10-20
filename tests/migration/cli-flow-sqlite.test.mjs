@@ -123,4 +123,33 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
     expect(wrong.stderr).toContain('RMIG-E-BUNDLE-DECRYPT');
     expect(existsSync(file('x.json'))).toBe(false);
   }, 180_000);
+
+  it('refuses validate before it touches the target when an input is missing, wrong or unreachable, and leaks no connection string', () => {
+    const bundle = ['--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase')];
+    const base = (target) => ['validate', ...bundle, '--decisions', file('decisions-reviewed.json'), '--plan', file('plan.json'), '--source-kind', 'sqlite', '--source', file('source.sqlite'), '--target', target, '--migration-id', 'rmig_cli_sqlite_01', '--dry-run-receipt', file('dummy-receipt.json'), '--import-receipt', file('dummy-receipt.json')];
+    writeFileSync(file('dummy-receipt.json'), '{}');
+    const missing = runCli(['validate', ...bundle, '--out', file('v.json')]);
+    expect(missing.status).toBe(2);
+    expect(missing.stderr).toMatch(/^RMIG-E-SOURCE-ARG: validate requires /u);
+    const unknown = runCli([...base('env:RMIG_TARGET'), '--out', file('v.json'), '--target-catalog', 'x']);
+    expect(unknown.status).toBe(2);
+    expect(unknown.stderr).toContain('RMIG-E-SOURCE-ARG');
+    const wrongKind = runCli([...base('env:RMIG_TARGET').map((value) => (value === 'sqlite' ? 'postgres' : value)), '--out', file('v.json')]);
+    expect(wrongKind.status).toBe(2);
+    expect(wrongKind.stderr).toContain('source kind');
+    const wrongId = runCli([...base('env:RMIG_TARGET').map((value) => (value === 'rmig_cli_sqlite_01' ? 'rmig_other_run_01' : value)), '--out', file('v.json')]);
+    expect(wrongId.status).toBe(2);
+    expect(wrongId.stderr).toContain('migration id');
+    const literal = runCli([...base('postgres://someone:hunter2@db.invalid/mind'), '--out', file('v.json')]);
+    expect(literal.status).toBe(2);
+    expect(`${literal.stdout}${literal.stderr}`).not.toContain('hunter2');
+    const unset = runCli([...base('env:RMIG_TARGET_NOT_SET'), '--out', file('v.json')], { RMIG_TARGET_NOT_SET: '' });
+    expect(unset.status).toBe(2);
+    expect(unset.stderr).toContain('RMIG-E-SOURCE-ARG');
+    const unreachable = runCli([...base('env:RMIG_TARGET_DEAD'), '--out', file('v.json')], { RMIG_TARGET_DEAD: 'postgres://someone:hunter2@127.0.0.1:1/mind?sslmode=disable' });
+    expect(unreachable.status, unreachable.output).toBe(2);
+    expect(unreachable.stderr).toContain('RMIG-E-TARGET-SCHEMA');
+    expect(unreachable.output).not.toContain('hunter2');
+    expect(existsSync(file('v.json'))).toBe(false);
+  }, 180_000);
 });

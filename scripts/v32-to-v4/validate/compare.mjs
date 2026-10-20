@@ -34,7 +34,8 @@ export class Findings {
   constructor(limit = 25) { this.limit = limit; this.counts = {}; this.samples = []; }
   add(check, details = {}) {
     this.counts[check] = (this.counts[check] ?? 0) + 1;
-    if (this.counts[check] <= this.limit) this.samples.push({ check, ...details });
+    // a finding is plain data for a report: a detail that is undefined is left out, not carried as a hole
+    if (this.counts[check] <= this.limit) this.samples.push({ check, ...Object.fromEntries(Object.entries(details).filter(([, value]) => value !== undefined)) });
   }
   get total() { return Object.values(this.counts).reduce((sum, value) => sum + value, 0); }
 }

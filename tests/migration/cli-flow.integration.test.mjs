@@ -137,6 +137,12 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
             expect(JSON.stringify(damaged), label).not.toContain('stray');
           }
 
+          // Pointing validate at the source as if it were the target is found, not read as a target.
+          const notATarget = step('validate against the source as target', validateArgs({ ...common, out: 'validation-not-a-target.json', target: 'env:RMIG_SOURCE' }), env, 2);
+          outputs.push(notATarget.output);
+          const notTargetChecks = Object.keys(JSON.parse(readFileSync(file('validation-not-a-target.json'), 'utf8')).violation_counts);
+          expect(notTargetChecks).toEqual(expect.arrayContaining(['target-is-the-source', 'target-ledger-mismatch', 'import-receipt-not-in-target', 'target-table-missing']));
+
           // A refusal is JSON on stdout under --json, like every other refusal.
           const cloneName = clones.at(-1);
           const json = step('validate --json', [...validateArgs({ ...common, out: 'validation-json.json', target: 'env:RMIG_CLONE' }), '--json'], { ...env, RMIG_CLONE: noTls(urlFor(cloneName)) }, 2);
