@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { migrationSetSha256, readV4Migrations, V4_MIGRATION_LOCK_ID, applyV4Migrations } from '../../scripts/migrate-postgres.mjs';
 import { CHECKS_SPEC_PATH, generateV4ChecksSpec, loadExpectedChecks } from '../../scripts/v32-to-v4/spec/v4-checks.mjs';
 import { postgresClientConfig } from '../../scripts/v32-to-v4/source/postgres-v32.mjs';
-import { Findings } from '../../scripts/v32-to-v4/validate/compare.mjs';
+import { Findings, comparePlanToTarget } from '../../scripts/v32-to-v4/validate/compare.mjs';
 import { readLiveTarget } from '../../scripts/v32-to-v4/validate/live-target.mjs';
 import { adminUrl, hasAdminDatabase, withScratchDatabase } from './helpers/postgres-scratch.mjs';
 
@@ -65,4 +65,51 @@ describe.skipIf(!hasAdminDatabase)('the released v4 CHECK constraints, against a
       expect(dropped.findings.counts['check-constraint-missing']).toBe(1);
     });
   }, 180_000);
+  it('flags a unique index it cannot re-prove, reads column defaults and the embedding dimension, and compares unstated target columns', async () => {
+    await withScratchDatabase(async (url) => {
+      const setup = new Client({ connectionString: url });
+      await setup.connect();
+      try {
+        await applyV4Migrations({ client: setup, migrations: await readV4Migrations(), lockId: V4_MIGRATION_LOCK_ID });
+        await setup.query("INSERT INTO public.journals (content) VALUES ('a row the plan states only by id and content')");
+      } finally { await setup.end(); }
+      const read = async () => {
+        const client = new Client({ ...postgresClientConfig(url), ssl: false });
+        await client.connect();
+        const findings = new Findings();
+        try { return { live: await readLiveTarget({ client, migrationId: 'rmig_unique_it_01', findings }), findings }; } finally { await client.end(); }
+      };
+
+      // the released schema has no partial or expression unique index, so a clean target has no such finding
+      const clean = await read();
+      expect(clean.findings.counts['unique-index-unexpected']).toBeUndefined();
+      expect(clean.live.embeddingDimension).toBe(768); // the dimension of embeddings.embedding, read from the target's own type
+      expect(clean.live.columnDefaults.journals.created_at.default).toMatch(/now\(\)|CURRENT_TIMESTAMP/iu);
+      expect(clean.live.columnDefaults.journals.id).toMatchObject({ default: expect.stringContaining('nextval') });
+
+      // a plan row that states only id and content: every other column the target holds is NULL or the database's own default
+      const stored = clean.live.tables.journals[0];
+      const plan = { members: { journals: [{ id: stored.id, content: stored.content }] } };
+      const compare = (live) => comparePlanToTarget({ plan, targetTables: { ...live.tables, journals: live.tables.journals }, columnTypes: live.columnTypes, columnDefaults: live.columnDefaults, importedAt: live.importedAt });
+      const journalFindings = (result) => result.findings.samples.filter((finding) => finding.table === 'journals');
+      expect(journalFindings(compare(clean.live))).toEqual([]);
+      expect(compare(clean.live).tables.journals.unstated_cells_compared).toBeGreaterThanOrEqual(5);
+      expect(compare(clean.live).tables.journals.default_expressions_not_evaluated).toBeGreaterThanOrEqual(1); // created_at is filled by now(), which is not evaluated
+
+      const alter = new Client({ connectionString: url });
+      await alter.connect();
+      try {
+        await alter.query("UPDATE public.journals SET tags = '[\"added\"]', emotion = 'unplanned' WHERE id = " + String(stored.id));
+        await alter.query('CREATE UNIQUE INDEX rmig_partial_uq ON public.journals (content) WHERE content IS NOT NULL');
+        await alter.query('CREATE UNIQUE INDEX rmig_expression_uq ON public.journals (lower(content))');
+      } finally { await alter.end(); }
+      const changed = await read();
+      expect(changed.findings.counts['unique-index-unexpected']).toBe(2);
+      expect(changed.findings.samples.filter((item) => item.check === 'unique-index-unexpected').map((item) => [item.index, item.reason]).sort()).toEqual([['rmig_expression_uq', 'expression-not-in-the-released-schema'], ['rmig_partial_uq', 'partial-not-in-the-released-schema']]);
+      // a value in a column the plan row never states is a finding (journals.tags and journals.emotion have no default)
+      const columns = journalFindings(compare(changed.live)).filter((finding) => finding.check === 'target-column-not-in-plan').map((finding) => finding.column).sort();
+      expect(columns).toEqual(['emotion', 'tags']);
+    });
+  }, 180_000);
+
 });

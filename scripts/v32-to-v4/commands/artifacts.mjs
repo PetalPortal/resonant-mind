@@ -44,13 +44,13 @@ export function writeArtifactNew(phase, path, value, { kind, passphraseFile, pla
   return { encrypted: true };
 }
 
-/** Opens an encrypted artifact with the passphrase file, or reads a plaintext one as JSON. */
-export function readArtifact(phase, path, label, { kind, passphraseFile }) {
+/** Opens an encrypted artifact with the passphrase file (for the migration `migrationId`, when the caller knows it), or reads a plaintext one as JSON. */
+export function readArtifact(phase, path, label, { kind, passphraseFile, migrationId }) {
   let bytes;
   try { bytes = readFileSync(path); } catch { throw refuseArgument(phase, `${label} is missing or is not valid JSON.`); }
   if (isSealed(bytes)) {
     const passphrase = passphraseFor(phase, passphraseFile, `${label} is encrypted, so it`);
-    try { return openSealedJson(bytes, { kind, passphrase, phase }); } finally { passphrase.fill(0); }
+    try { return openSealedJson(bytes, { kind, passphrase, phase, migrationId }); } finally { passphrase.fill(0); }
   }
   try { return JSON.parse(bytes.toString('utf8')); } catch { throw refuseArgument(phase, `${label} is missing or is not valid JSON.`); }
 }

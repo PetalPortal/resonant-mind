@@ -9,7 +9,7 @@ export function parsePlanReembedArgs(argv) {
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [key.slice(2).replace(/-([a-z])/gu, (_m, c) => c.toUpperCase()), value]));
 }
 export function planReembedCommand(args) {
-  const input = readArtifact(PHASE, args.input, 'The relational staging input', { kind: 'relational-plan', passphraseFile: args.passphraseFile });
+  const input = readArtifact(PHASE, args.input, 'The relational staging input', { kind: 'relational-plan', passphraseFile: args.passphraseFile, migrationId: args.migrationId });
   const images = args.images ? readJsonFile(PHASE, args.images, 'The image plan') : input.image_inventory ?? [];
   const plan = buildReembedPlan({ ...input, images, migrationId: args.migrationId, bundleManifestSha256: args.bundleManifestSha256, compiledPolicySha256: args.compiledPolicySha256 });
   writeJsonNew(PHASE, args.out, plan);

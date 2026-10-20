@@ -61,10 +61,10 @@ describe('external blocker regressions', () => {
   });
 
   it('requires exact relational receipts and does not infer readiness from booleans', () => {
-    const report = reconcileMigration({ source: { observations: [{ id: 1, content: 'x' }] }, target: { observations: [{ id: 1, content: 'x' }] }, imagePlan: { entries: [] }, reembedPlan: { jobs: [] } });
+    const report = reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'test-model', expectedDimension: 3, source: { observations: [{ id: 1, content: 'x' }] }, target: { observations: [{ id: 1, content: 'x' }] }, imagePlan: { entries: [] }, reembedPlan: { jobs: [] } });
     expect(report.status).not.toBe('ready-for-cutover');
     expect(report.violations.length).toBeGreaterThan(0);
-    expect(determineMigrationStatus(report)).not.toBe('complete-after-operator-cutover-ack');
+    expect(determineMigrationStatus(report)).not.toBe('complete-operator-attested');
   });
 
   it('never turns the CLI acknowledgement flag into cutover completion', () => {
@@ -74,7 +74,7 @@ describe('external blocker regressions', () => {
     const evidence = { format_version: 1, evidence_type: 'operator-cutover', migration_id: body.migration_id, report_sha256: body.report_sha256, operator_action: { performed: true, actor: 'operator-1', performed_at: '2026-09-20T00:00:00.000Z', change_id: 'deploy-1' }, readback: { verified: true, verified_at: '2026-09-20T00:01:00.000Z', observed_version: 'v4' } };
     evidence.evidence_sha256 = canonicalSha256(evidence);
     expect(validateOperatorCutoverEvidence({ report: body, evidence })).toBe(true);
-    expect(determineMigrationStatus(body, { operatorCutoverEvidence: evidence })).toBe('complete-after-operator-cutover-evidence');
+    expect(determineMigrationStatus(body, { operatorCutoverEvidence: evidence })).toBe('complete-operator-attested');
   });
 
   it('refuses invariant validation without actual catalog and migration evidence', () => {

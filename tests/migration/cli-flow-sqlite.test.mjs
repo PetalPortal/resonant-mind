@@ -132,7 +132,7 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
     // encrypted by default: the file is not JSON and holds none of the migrated content
     for (const name of ['compiled-policy.json', 'plan.json']) {
       const raw = readFileSync(file(name));
-      expect(raw.subarray(0, 8).toString('ascii'), name).toBe('RMIGART1');
+      expect(raw.subarray(0, 8).toString('ascii'), name).toBe('RMIGART2');
       expect(raw.toString('latin1'), name).not.toContain('Rhizome');
       expect(raw.toString('latin1'), name).not.toContain('Ada (work)');
     }

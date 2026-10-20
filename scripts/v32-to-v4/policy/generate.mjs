@@ -4,7 +4,7 @@ import { canonicalSha256, sha256Hex } from '../lib/hash.mjs';
 import { FORMAT_VERSION } from '../lib/contracts.mjs';
 import { MigrationRefusal } from '../lib/refusal.mjs';
 import { verifyBundle, readBundleMember } from '../lib/bundle.mjs';
-import { numbersSurviveParsing } from '../lib/lossless-json.mjs';
+import { jsonSurvivesParsing } from '../lib/lossless-json.mjs';
 import { parseInstantMicros } from '../lib/instant.mjs';
 
 const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3,})?(?:Z|[+-]\d{2}:\d{2})$/u;
@@ -124,7 +124,7 @@ function dateAmbiguity(value) {
 }
 function shapeOk(value, shape) {
   let parsed = value;
-  if (typeof value === 'string') { try { parsed = JSON.parse(value); } catch { return false; } if (!numbersSurviveParsing(value)) return false; }
+  if (typeof value === 'string') { try { parsed = JSON.parse(value); } catch { return false; } if (!jsonSurvivesParsing(value)) return false; }
   if (shape === 'array') return Array.isArray(parsed);
   if (shape === 'integer-array') return Array.isArray(parsed) && parsed.every((item) => Number.isSafeInteger(typeof item === 'number' ? item : Number(item)));
   if (shape === 'object') return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
@@ -181,7 +181,7 @@ export function generateDecisionItems(bundle) {
         if (reason) add(items, seen, makeItem('timestamp', table, row, index, reason, reason === INVALID_TIMESTAMP ? ['exclude-row'] : ['normalize-utc', 'exclude-row'], { field, observed_value_sha256: sha256Hex(String(value)) }));
       }
       const shape = JSON_SHAPES.get(field);
-      if (shape && value !== null && value !== undefined && !shapeOk(value, shape)) add(items, seen, makeItem('malformed-json', table, row, index, `JSON field does not match the expected ${shape} shape, or holds a number that JavaScript cannot carry exactly`, ['map-json', 'exclude-row'], { field, expected_shape: shape, observed_value_sha256: sha256Hex(String(value)) }));
+      if (shape && value !== null && value !== undefined && !shapeOk(value, shape)) add(items, seen, makeItem('malformed-json', table, row, index, `JSON field does not match the expected ${shape} shape, or holds a number that JavaScript cannot carry exactly, or repeats an object key`, ['map-json', 'exclude-row'], { field, expected_shape: shape, observed_value_sha256: sha256Hex(String(value)) }));
       if ((field === 'context' || field === 'scope' || field === 'primary_context') && value !== null && value !== undefined && !KNOWN_CONTEXTS.has(String(value).toLowerCase())) add(items, seen, itemForUnknown(table, row, index, field, value, 'context/scope value is not a known deterministic value', ['map-context', 'exclude-row']));
       if (['status', 'salience', 'certainty', 'weight', 'charge', 'source', 'thread_type', 'priority', 'intensity'].includes(field) && value !== null && value !== undefined) {
         const allowed = TARGET_ENUM_ALIASES.get(`${table}.${field}`);

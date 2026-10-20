@@ -124,7 +124,7 @@ describe('operator migration documentation', () => {
       '--target', '--bundle-manifest-sha256', '--compiled-policy-sha256',
       '--resume-schema', '--plan', '--staging-schema', '--receipt-out', '--dry-run',
       '--input', '--images', '--adapter', '--external-receipt', '--trusted-public-key',
-      '--reembed-plan', '--reembed-receipts', '--dry-run-receipt', '--import-receipt',
+      '--reembed-plan', '--reembed-receipts', '--embedding-model', '--image-target-dir', '--dry-run-receipt', '--import-receipt',
       '--image-plan', '--image-receipt', '--operator-cutover-ack',
     ]);
     expect(text).toContain('node scripts/v32-to-v4/cli.mjs <command> --help');

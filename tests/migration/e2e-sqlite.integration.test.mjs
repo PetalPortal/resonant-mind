@@ -70,9 +70,9 @@ describe('synthetic D1/SQLite v3.2 to v4 operator path', () => {
 
     const imagePlan = buildImageInventory({ images: [], migrationId: plan.migration_id, bundleManifestSha256: plan.bundle_manifest_sha256, compiledPolicySha256: plan.compiled_policy_sha256 });
     const imageReceipt = { format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: imagePlan.migration_id, plan_sha256: imagePlan.plan_sha256, bundle_manifest_sha256: imagePlan.bundle_manifest_sha256, compiled_policy_sha256: imagePlan.compiled_policy_sha256, entries: [] };
-    validateImageReceipt({ plan: imagePlan, receipt: imageReceipt });
+    validateImageReceipt({ plan: imagePlan, receipt: imageReceipt, requireSignature: false });
     const reembedPlan = plan.reembed_jobs;
-    const missingExternal = () => reconcileMigration({ source: bundle.tables, exported: bundle.tables, staged: bundle.tables, target: bundle.tables, imagePlan, imageReceipt, reembedPlan, migrationId: plan.migration_id });
+    const missingExternal = () => reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'synthetic-model', expectedDimension: 3, source: bundle.tables, exported: bundle.tables, staged: bundle.tables, target: bundle.tables, imagePlan, imageReceipt, reembedPlan, migrationId: plan.migration_id });
     expect(missingExternal).not.toThrow();
     expect(missingExternal().status).toBe('refused');
 
@@ -81,7 +81,7 @@ describe('synthetic D1/SQLite v3.2 to v4 operator path', () => {
     const targetIdentity = { database_identity_sha256: 'c'.repeat(64) };
     const dryRunReceipt = buildDryRunReport({ plan, targetIdentity, migrationSetSha256: 'd'.repeat(64), migratorVersion: '4.0.1', stageContentSha256: canonicalSha256(plan.members), targetStateSha256: canonicalSha256({ fresh: true }) });
     const importReceipt = buildImportReceipt({ plan, dryRun: dryRunReceipt, targetIdentity, insertedRows: Object.values(plan.members).reduce((sum, rows) => sum + rows.length, 0) });
-    const ready = reconcileMigration({ source: bundle.tables, exported: bundle.tables, staged: bundle.tables, target: bundle.tables, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt, migrationId: plan.migration_id });
+    const ready = reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'synthetic-model', expectedDimension: 3, source: bundle.tables, exported: bundle.tables, staged: bundle.tables, target: bundle.tables, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt, migrationId: plan.migration_id });
     expect(ready.status).toBe('ready-for-cutover');
 
     const leftovers = readdirSync(root).filter((name) => name.includes('incomplete') || name.endsWith('.tmp'));

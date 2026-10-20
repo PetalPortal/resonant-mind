@@ -9,7 +9,7 @@ import { MigrationRefusal } from '../../scripts/v32-to-v4/lib/refusal.mjs';
 const work = mkdtempSync(join(tmpdir(), 'rmig-sealed-'));
 afterAll(() => rmSync(work, { recursive: true, force: true }));
 const key = (name, text) => { const path = join(work, name); writeFileSync(path, text, { mode: 0o600 }); return path; };
-const content = { plan_type: 'x', members: { journals: [{ id: 1, content: 'a private sentence about the garden' }] } };
+const content = { plan_type: 'x', migration_id: 'rmig_sealed_test_01', members: { journals: [{ id: 1, content: 'a private sentence about the garden' }] } };
 
 describe('encrypted artifacts', () => {
   it('round-trips, hides the content, and fails closed on any change', () => {
@@ -42,7 +42,7 @@ describe('writing and reading an artifact', () => {
     expect(isSealed(readFileSync(path))).toBe(true);
     expect(readArtifact('validate', path, 'The plan', { kind: 'relational-plan', passphraseFile })).toEqual(content);
     const before = readFileSync(path);
-    expect(() => writeArtifactNew('plan-relational', path, { other: true }, { kind: 'relational-plan', passphraseFile })).toThrow(/already exists/u);
+    expect(() => writeArtifactNew('plan-relational', path, { other: true, migration_id: 'rmig_sealed_test_01' }, { kind: 'relational-plan', passphraseFile })).toThrow(/already exists/u);
     expect(readFileSync(path).equals(before)).toBe(true);
     // a sealed file is not read without its key, or as another kind
     expect(() => readArtifact('validate', path, 'The plan', { kind: 'relational-plan', passphraseFile: key('wrong', 'not-the-passphrase') })).toThrow(/could not be opened/u);

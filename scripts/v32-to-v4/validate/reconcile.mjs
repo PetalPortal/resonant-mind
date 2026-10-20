@@ -1,7 +1,7 @@
 import { canonicalJson } from '../lib/canonical-json.mjs';
 import { canonicalSha256 } from '../lib/hash.mjs';
 import { MigrationRefusal } from '../lib/refusal.mjs';
-import { validateImageReceipt } from '../external/images.mjs';
+import { imageSignatureRequired, validateImageReceipt } from '../external/images.mjs';
 import { validateReembedReceipts } from '../external/reembed.mjs';
 
 function tables(value) { return Array.isArray(value) ? { rows: value } : value && typeof value === 'object' ? value : {}; }
@@ -45,11 +45,29 @@ function receiptHash(value) { return value ? canonicalSha256(value) : null; }
 function hashBody(value, field) { const copy = { ...value }; delete copy[field]; return canonicalSha256(copy); }
 // The hash of a validation report covers everything except itself and its keyed seal (the seal is made over the hash).
 export function reportBodyHash(report) { const copy = { ...report }; delete copy.report_sha256; delete copy.report_seal; return canonicalSha256(copy); }
+/**
+ * Operator cutover evidence is the operator's own statement that the cutover was made and read back. This
+ * tool cannot observe a deployment, so it checks what it can (the evidence is for this migration and this
+ * exact report, its hash holds, and it states the action and the readback) and calls the result
+ * operator-attested, never verified.
+ */
 export function validateOperatorCutoverEvidence({ report, evidence } = {}) {
   if (!report || !evidence || evidence.format_version !== 1 || evidence.evidence_type !== 'operator-cutover' || evidence.migration_id !== report.migration_id || evidence.report_sha256 !== report.report_sha256 || evidence.evidence_sha256 !== hashBody(evidence, 'evidence_sha256')) throw refusal('Operator cutover evidence is missing, stale, or not hash-bound to the validation report.');
   const action = evidence.operator_action; const readback = evidence.readback;
   if (!action || action.performed !== true || typeof action.actor !== 'string' || action.actor.length === 0 || typeof action.performed_at !== 'string' || typeof action.change_id !== 'string' || action.change_id.length === 0 || !readback || readback.verified !== true || typeof readback.verified_at !== 'string' || typeof readback.observed_version !== 'string' || readback.observed_version.length === 0) throw refusal('Operator cutover evidence must contain explicit action and deployment readback fields.');
   return true;
+}
+/**
+ * What each part of a state rests on, in plain terms: what the tool verified itself and what it is relying on
+ * someone else's word for. Re-embedding and the cutover are always attested (the tool cannot observe either);
+ * images are tool-verified only when the tool re-hashed the objects, and attested when only a signed receipt
+ * says they were copied.
+ */
+export function stateBasis(report, { cutoverEvidenceAccepted = false } = {}) {
+  const relational = report?.relational_reconciliation_complete === true && report?.dry_run_receipt_complete === true && report?.import_receipt_complete === true ? 'verified-by-tool' : 'not-established';
+  const imageBasis = report?.images_complete !== true ? 'pending' : report?.images?.basis === 'tool-rehashed-objects' ? 'verified-by-tool' : report?.images?.basis === 'nothing-planned' ? 'nothing-planned' : report?.images?.basis === 'signed-receipt-attested' ? 'attested-by-signed-receipt' : 'complete-basis-not-recorded';
+  const reembed = report?.reembed_complete !== true ? 'pending' : report?.reembed?.basis === 'nothing-planned' ? 'nothing-planned' : report?.reembed?.basis === 'receipts-attested' ? 'attested-by-receipts' : 'complete-basis-not-recorded';
+  return { relational, images: imageBasis, reembed, cutover: cutoverEvidenceAccepted ? 'attested-by-operator' : 'none' };
 }
 export function determineMigrationStatus(report, { operatorCutoverEvidence, requireReportHash = true } = {}) {
   if (report?.refusal || report?.violations?.length || !report || requireReportHash && report.report_sha256 !== reportBodyHash(report)) return 'refused';
@@ -60,16 +78,16 @@ export function determineMigrationStatus(report, { operatorCutoverEvidence, requ
   if (!report?.imported) return 'review-required';
   if (!report?.images_complete) return 'data-imported-images-pending';
   if (!report?.reembed_complete) return 'data-imported-not-search-ready';
-  if (operatorCutoverEvidence !== undefined && operatorCutoverEvidence !== null) return 'complete-after-operator-cutover-evidence';
+  if (operatorCutoverEvidence !== undefined && operatorCutoverEvidence !== null) return 'complete-operator-attested';
   return 'ready-for-cutover';
 }
-export function reconcileMigration({ source, exported, staged, target, decisions = [], losses = [], imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt, trustedPublicKey, dryRunAccepted, imported, migrationId = source?.migration_id ?? imagePlan?.migration_id ?? reembedPlan?.migration_id } = {}) {
+export function reconcileMigration({ source, exported, staged, target, decisions = [], losses = [], imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt, trustedPublicKey, toolObservedImageObjects = false, expectedModel, expectedDimension, dryRunAccepted, imported, migrationId = source?.migration_id ?? imagePlan?.migration_id ?? reembedPlan?.migration_id } = {}) {
   if (source === undefined) throw refusal('Relational reconciliation requires a source snapshot.');
   const allowed = adjustmentKeys(decisions, losses); const sourceCounts = tableCounts(source); const exportCounts = tableCounts(exported); const stageCounts = tableCounts(staged); const targetCounts = tableCounts(target);
   const violations = [...boundaryDiff(source, exported, 'exported', allowed), ...boundaryDiff(source, staged, 'staged', allowed), ...boundaryDiff(source, target, 'target', allowed)];
   let imageOk = false; let reembedOk = false;
-  if (!imagePlan || !imageReceipt) violations.push({ check: 'external-image-receipt-missing' }); else { try { validateImageReceipt({ plan: imagePlan, receipt: imageReceipt, migrationId, trustedPublicKey }); imageOk = true; } catch { violations.push({ check: 'external-image-receipt-invalid' }); } }
-  if (!reembedPlan || !reembedReceipts) violations.push({ check: 'external-reembed-receipt-missing' }); else { try { validateReembedReceipts({ plan: reembedPlan, receipts: reembedReceipts, migrationId }); reembedOk = true; } catch { violations.push({ check: 'external-reembed-receipt-invalid' }); } }
+  if (!imagePlan || !imageReceipt) violations.push({ check: 'external-image-receipt-missing' }); else { try { validateImageReceipt({ plan: imagePlan, receipt: imageReceipt, migrationId, trustedPublicKey, requireSignature: imageSignatureRequired({ trustedPublicKey, toolObservedObjects: toolObservedImageObjects === true }) }); imageOk = true; } catch { violations.push({ check: 'external-image-receipt-invalid' }); } }
+  if (!reembedPlan || !reembedReceipts) violations.push({ check: 'external-reembed-receipt-missing' }); else { try { validateReembedReceipts({ plan: reembedPlan, receipts: reembedReceipts, migrationId, expectedModel, expectedDimension }); reembedOk = true; } catch { violations.push({ check: 'external-reembed-receipt-invalid' }); } }
   const dryRunOk = successfulReceipt(dryRunReceipt, ['validated', 'complete'], { migrationId, kind: 'fresh-v4-dry-run' }); const importOk = successfulReceipt(importReceipt, ['complete', 'imported'], { migrationId, kind: 'fresh-v4-import', dryRunReceipt }); if (!dryRunOk) violations.push({ check: 'dry-run-receipt-invalid' }); if (!importOk) violations.push({ check: 'import-receipt-invalid' });
   const report = { format_version: 1, report_type: 'migration-reconciliation', migration_id: migrationId ?? null, counts: { source: sourceCounts, exported: exportCounts, staged: stageCounts, target: targetCounts }, row_hashes: { source: canonicalSha256(rowHashes(source)), exported: exported === undefined ? null : canonicalSha256(rowHashes(exported)), staged: staged === undefined ? null : canonicalSha256(rowHashes(staged)), target: target === undefined ? null : canonicalSha256(rowHashes(target)) }, decisions: { count: decisions.length, sha256: canonicalSha256(decisions) }, losses: { count: losses.length, sha256: canonicalSha256(losses) }, target_present: target !== undefined, exported: exported !== undefined, dry_run_accepted: dryRunOk, imported: importOk, dry_run_receipt_complete: dryRunOk, import_receipt_complete: importOk, relational_reconciliation_complete: violations.filter(({ check }) => ['missing-input', 'extra-row', 'missing-row', 'row-hash-mismatch', 'count-mismatch'].includes(check)).length === 0 && dryRunOk && importOk, images: { planned: imagePlan?.entries?.length ?? 0, receipt_sha256: receiptHash(imageReceipt) }, reembed: { planned: reembedPlan?.jobs?.length ?? 0, receipt_sha256: receiptHash(reembedReceipts) }, images_complete: imageOk, reembed_complete: reembedOk, violations };
   report.status = determineMigrationStatus(report, { requireReportHash: false }); report.report_sha256 = canonicalSha256(report); return report;

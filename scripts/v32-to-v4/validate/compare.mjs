@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 import { canonicalJson } from '../lib/canonical-json.mjs';
 import { canonicalSha256 } from '../lib/hash.mjs';
 import { parseInstantMicros } from '../lib/instant.mjs';
-import { sameJsonLossless } from '../lib/lossless-json.mjs';
+import { jsonSurvivesParsing, sameJsonLossless } from '../lib/lossless-json.mjs';
 import { sourceKey } from '../transform/id-map.mjs';
 import { KIND_NORMALIZATIONS, SQLITE_UTC, DATE_FIELDS, TIMESTAMP_FIELDS, decisionItemForCell } from '../policy/generate.mjs';
 import { ALIASES, CONTEXTS, ENUMS, ENUM_FIELDS } from '../transform/value-map.mjs';
@@ -290,6 +290,7 @@ export function compareSourceToTarget({ sourceTables, targetTables, compiled, de
           let expected = sv;
           let parsed;
           try { parsed = typeof sv === 'string' ? JSON.parse(sv) : sv; } catch { parsed = undefined; }
+          if (typeof sv === 'string' && parsed !== undefined && !jsonSurvivesParsing(sv)) parsed = undefined; // a repeated key or an inexact number is a reviewed decision, as in the plan
           if (parsed === undefined) {
             const choice = reviewedChoice(decisions, sourceTable, rowHash, 'malformed-json', sc);
             if (choiceAction(choice) !== 'map-json' || !Object.hasOwn(choice, 'value')) { fail(tc, 'json-unreviewed'); return; }
@@ -437,11 +438,71 @@ export function planCellMismatch({ table, column, value, dbValue, columnType, im
 }
 
 /**
+ * The value of a simple literal column default as the catalog prints it ('active'::text, 0, 1.5, false,
+ * '{}'::jsonb), or { literal: false } for anything else (a function call such as now() or nextval(...), an
+ * expression, an array). Nothing here evaluates text from the target.
+ */
+export function literalDefault(expression) {
+  if (typeof expression !== 'string') return { literal: false };
+  const text = expression.trim().replace(/(?:::[A-Za-z_][A-Za-z0-9_ ]*(?:\(\d+(?:,\d+)?\))?)+$/u, '');
+  if (/^NULL$/iu.test(text)) return { literal: true, value: null };
+  if (/^(?:true|false)$/iu.test(text)) return { literal: true, value: text.toLowerCase() === 'true' };
+  if (/^-?\d+(?:\.\d+)?$/u.test(text)) return { literal: true, value: Number(text), numeric: true };
+  const quoted = /^'((?:[^']|'')*)'$/u.exec(text);
+  if (quoted) return { literal: true, value: quoted[1].replaceAll("''", "'") };
+  return { literal: false };
+}
+
+/**
+ * Columns a released v4 trigger fills in when the plan row leaves them out, with the derivation the trigger
+ * applies (0006_identity_kind.sql: identity.kind is the first dotted segment of section, other characters
+ * folded to underscores, lower-cased). The validator re-derives the value itself, in the same order of
+ * operations as the trigger (fold first, then lower-case), instead of trusting the stored one.
+ */
+export const TRIGGER_DERIVED = Object.freeze({
+  identity: Object.freeze({ kind: (row) => (typeof row?.section === 'string' ? row.section.split('.')[0].replace(/[^a-z0-9_]+/gu, '_').toLowerCase() : null) }),
+});
+
+/**
+ * A target column the plan row does not state. The database fills such a column from its default, so the
+ * only values it may hold are NULL, the column's own literal default, a value the database computes (a
+ * generated or identity column), or the result of a default expression (now(), nextval(...)) that this
+ * validator does not evaluate and reports as such, or a value a released v4 trigger derives from the rest of
+ * the row (TRIGGER_DERIVED), which must be exactly what that trigger derives. Anything else is a value nobody planned. With no
+ * knowledge of the column's default, any non-NULL value is unplanned. Returns the state:
+ * 'absent' | 'default' | 'computed' | 'derived' | 'default-expression-not-evaluated' | 'unplanned-value' | 'default-differs' | 'derived-value-differs'.
+ */
+export function unstatedCellState({ table, column, row, dbValue = row?.[column], columnInfo }) {
+  if (dbValue === null || dbValue === undefined) return 'absent';
+  const derive = TRIGGER_DERIVED[table]?.[column];
+  if (derive !== undefined) return derive(row) === dbValue ? 'derived' : 'derived-value-differs';
+  if (columnInfo === undefined || columnInfo === null) return 'unplanned-value';
+  if (columnInfo.generated === true || columnInfo.identity === true) return 'computed';
+  if (columnInfo.default === null || columnInfo.default === undefined) return 'unplanned-value';
+  const parsed = literalDefault(columnInfo.default);
+  if (!parsed.literal) return 'default-expression-not-evaluated';
+  if (parsed.value === null) return 'default-differs';
+  let same;
+  if (parsed.numeric) same = Number(dbValue) === parsed.value;
+  else if (typeof parsed.value === 'boolean') same = dbValue === parsed.value;
+  else if (typeof dbValue === 'string') same = dbValue === parsed.value || sameJson(dbValue, parsed.value);
+  else same = false;
+  return same ? 'default' : 'default-differs';
+}
+
+/** The target columns of one row: those the catalog lists for the table and those the row carries (a view has no catalog entry). */
+export function targetColumns(columnTypes, table, row) {
+  return [...new Set([...Object.keys(columnTypes?.[table] ?? {}), ...Object.keys(row ?? {})])];
+}
+
+/**
  * The plan the target was imported from, against the rows the target holds. Every column the plan row
  * states is compared by its v4 column type; a plan NULL in a column v4's routing trigger fills in must be
- * exactly that default. Rows may not be missing, extra or duplicated.
+ * exactly that default. Every other column the target holds is compared too (see unstatedCellState): plan
+ * rows are insert-shaped and need not carry every v4 column, but a value in a column the plan did not state
+ * is only acceptable if it is NULL or the database's own default. Rows may not be missing, extra or duplicated.
  */
-export function comparePlanToTarget({ plan, targetTables, columnTypes = {}, importedAt }) {
+export function comparePlanToTarget({ plan, targetTables, columnTypes = {}, columnDefaults = {}, importedAt }) {
   const findings = new Findings();
   const tables = {};
   let cells = 0;
@@ -449,7 +510,7 @@ export function comparePlanToTarget({ plan, targetTables, columnTypes = {}, impo
     const expectedRows = plan.members?.[table] ?? [];
     const actualRows = targetTables[table] ?? [];
     const schema = TARGET_SCHEMAS[table];
-    const summary = { plan_rows: expectedRows.length, target_rows: actualRows.length, cells_compared: 0 };
+    const summary = { plan_rows: expectedRows.length, target_rows: actualRows.length, cells_compared: 0, unstated_cells_compared: 0, default_expressions_not_evaluated: 0 };
     tables[table] = summary;
     if (!schema) { findings.add('plan-table-unknown', { table }); continue; }
     const byId = new Map();
@@ -466,6 +527,13 @@ export function comparePlanToTarget({ plan, targetTables, columnTypes = {}, impo
         if (value === undefined) continue;
         const difference = planCellMismatch({ table, column, value, dbValue: actual[column], columnType: columnTypes[table]?.[column], importedAt });
         if (difference !== null) findings.add('plan-cell-mismatch', { table, ...safeId(planned.id), column, difference });
+      }
+      for (const column of targetColumns(columnTypes, table, actual)) {
+        if (planned[column] !== undefined) continue;
+        cells += 1; summary.cells_compared += 1; summary.unstated_cells_compared += 1;
+        const state = unstatedCellState({ table, column, row: actual, columnInfo: columnDefaults[table]?.[column] });
+        if (state === 'unplanned-value' || state === 'default-differs' || state === 'derived-value-differs') findings.add('target-column-not-in-plan', { table, ...safeId(planned.id), column, difference: state });
+        else if (state === 'default-expression-not-evaluated') summary.default_expressions_not_evaluated += 1;
       }
     }
     for (const [key, row] of byId) if (!seen.has(key)) findings.add('target-row-not-in-plan', { table, ...safeId(row.id) });

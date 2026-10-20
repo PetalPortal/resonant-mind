@@ -43,10 +43,10 @@ describe('re-embedding receipts', () => {
     const left = buildReembedPlan(args); const right = buildReembedPlan(args);
     expect(left).toEqual(right); expect(left.legacy_vectors_imported).toBe(false); expect(left.jobs).toHaveLength(2);
     const job = left.jobs[0];
-    expect(() => validateReembedReceipts({ plan: left, receipts: { format_version: 1, migration_id: left.migration_id, plan_sha256: left.plan_sha256, receipts: [{ job_id: job.job_id, status: 'partial' }] } })).toThrowError(expect.objectContaining({ code: 'RMIG-E-REEMBED-INCOMPLETE' }));
-    expect(() => validateReembedReceipts({ plan: left, targetRows: { [`${job.target_locator.table}:${job.target_locator.id}`]: { id: job.target_locator.id, content: 'changed' } }, receipts: { format_version: 1, migration_id: left.migration_id, plan_sha256: left.plan_sha256, receipts: [{ job_id: job.job_id, target_locator: job.target_locator, migration_id: left.migration_id, plan_sha256: left.plan_sha256, status: 'complete', model: 'test-model', dimension: 3, content_hash: job.content_hash }] } })).toThrowError(expect.objectContaining({ code: 'RMIG-E-REEMBED-INCOMPLETE' }));
+    expect(() => validateReembedReceipts({ expectedModel: 'test-model', expectedDimension: 3, plan: left, receipts: { format_version: 1, migration_id: left.migration_id, plan_sha256: left.plan_sha256, receipts: [{ job_id: job.job_id, status: 'partial' }] } })).toThrowError(expect.objectContaining({ code: 'RMIG-E-REEMBED-INCOMPLETE' }));
+    expect(() => validateReembedReceipts({ expectedModel: 'test-model', expectedDimension: 3, plan: left, targetRows: { [`${job.target_locator.table}:${job.target_locator.id}`]: { id: job.target_locator.id, content: 'changed' } }, receipts: { format_version: 1, migration_id: left.migration_id, plan_sha256: left.plan_sha256, receipts: [{ job_id: job.job_id, target_locator: job.target_locator, migration_id: left.migration_id, plan_sha256: left.plan_sha256, status: 'complete', model: 'test-model', dimension: 3, content_hash: job.content_hash }] } })).toThrowError(expect.objectContaining({ code: 'RMIG-E-REEMBED-INCOMPLETE' }));
     const complete = left.jobs.map((item) => ({ job_id: item.job_id, migration_id: left.migration_id, plan_sha256: left.plan_sha256, target_locator: item.target_locator, ...(item.modality === 'image' ? { source_logical_path: item.source_logical_path, target_key: item.target_key, ...(item.object_sha256 === undefined ? {} : { object_sha256: item.object_sha256, source_sha256: item.object_sha256 }), ...(item.object_size === undefined ? {} : { object_size: item.object_size }), ...(item.object_mime === undefined ? {} : { object_mime: item.object_mime }) } : {}), status: 'complete', model: 'test-model', dimension: 3, content_hash: item.content_hash }));
-    expect(validateReembedReceipts({ plan: left, receipts: { format_version: 1, migration_id: left.migration_id, plan_sha256: left.plan_sha256, receipts: complete }, expectedModel: 'test-model', expectedDimension: 3 })).toMatchObject({ complete: true, status: 'complete' });
+    expect(validateReembedReceipts({ expectedModel: 'test-model', expectedDimension: 3, plan: left, receipts: { format_version: 1, migration_id: left.migration_id, plan_sha256: left.plan_sha256, receipts: complete }, expectedModel: 'test-model', expectedDimension: 3 })).toMatchObject({ complete: true, status: 'complete' });
   });
 });
 
@@ -81,7 +81,7 @@ describe('append-only checkpoints and final reconciliation', () => {
     const targetIdentity = { database_identity_sha256: 'd'.repeat(64) };
     const dryRunReceipt = buildDryRunReport({ plan, targetIdentity, migrationSetSha256: '1'.repeat(64), migratorVersion: '4.0.1', stageContentSha256: canonicalSha256({}), targetStateSha256: canonicalSha256({}) });
     const importReceipt = buildImportReceipt({ plan, dryRun: dryRunReceipt, targetIdentity, insertedRows: 0 });
-    const report = reconcileMigration({ source: { ...rowset, migration_id: imagePlan.migration_id }, exported: rowset, staged: rowset, target: rowset, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt });
+    const report = reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'test-model', expectedDimension: 3, source: { ...rowset, migration_id: imagePlan.migration_id }, exported: rowset, staged: rowset, target: rowset, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt });
     expect(report.status).toBe('ready-for-cutover'); expect(determineMigrationStatus(report)).toBe('ready-for-cutover');
   });
 });

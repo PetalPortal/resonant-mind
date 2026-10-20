@@ -28,7 +28,7 @@ describe('cutover evidence that does not validate is refused, never set aside', 
   it('reads ready-for-cutover with no evidence, and complete with valid evidence', () => {
     expect(report.status).toBe('ready-for-cutover');
     expect(determineMigrationStatus(report)).toBe('ready-for-cutover');
-    expect(determineMigrationStatus(report, { operatorCutoverEvidence: evidenceFor(report) })).toBe('complete-after-operator-cutover-evidence');
+    expect(determineMigrationStatus(report, { operatorCutoverEvidence: evidenceFor(report) })).toBe('complete-operator-attested');
   });
   it.each([
     ['garbage', { not: 'evidence' }],
@@ -58,7 +58,7 @@ describe('status reports a state only for a report that validate sealed', () => 
     expect(result).toMatchObject({ status: 'ready-for-cutover', report_verified: true });
     expect(humanStatusResult(result)).toMatch(/^status: ready-for-cutover; report_verified=true;/u);
     // the cutover evidence still moves it on, and bad evidence refuses it
-    expect(statusCommand({ report, passphraseFile: path, evidence: evidenceFor(report) }).status).toBe('complete-after-operator-cutover-evidence');
+    expect(statusCommand({ report, passphraseFile: path, evidence: evidenceFor(report) }).status).toBe('complete-operator-attested');
     expect(statusCommand({ report, passphraseFile: path, evidence: { not: 'evidence' } }).status).toBe('refused');
   });
 
@@ -113,7 +113,7 @@ describe('the status command through the CLI', () => {
     expect(ok.status, ok.output).toBe(0);
     expect(ok.stdout).toMatch(/^status: ready-for-cutover; report_verified=true;/u);
     const done = runCli(['status', '--report', join(work, 'report.json'), '--passphrase-file', key, '--cutover-evidence', join(work, 'evidence.json')]);
-    expect(done.stdout).toMatch(/^status: complete-after-operator-cutover-evidence;/u);
+    expect(done.stdout).toMatch(/^status: complete-operator-attested;/u);
     const garbage = runCli(['status', '--report', join(work, 'report.json'), '--passphrase-file', key, '--cutover-evidence', join(work, 'garbage-evidence.json')]);
     expect(garbage.status).toBe(2);
     expect(garbage.stdout).toMatch(/^status: refused;/u);

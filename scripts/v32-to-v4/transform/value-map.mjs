@@ -2,7 +2,7 @@ import { canonicalJson } from '../lib/canonical-json.mjs';
 import { canonicalSha256 } from '../lib/hash.mjs';
 import { KIND_NORMALIZATIONS, ISO_WITH_OFFSET, SQLITE_UTC, TIMESTAMP_FIELDS, DATE_FIELDS, decisionItemForCell } from '../policy/generate.mjs';
 import { choiceAction } from './id-map.mjs';
-import { numbersSurviveParsing } from '../lib/lossless-json.mjs';
+import { jsonSurvivesParsing } from '../lib/lossless-json.mjs';
 import { parseInstantMicros } from '../lib/instant.mjs';
 
 const ENUMS = {
@@ -66,7 +66,7 @@ export function normalizeDate(value, { choice, table, field } = {}) {
 export function normalizeJson(value, expectedShape, { choice } = {}) {
   if (missing(value)) return value ?? null;
   let parsed = value;
-  if (typeof value === 'string') { try { parsed = JSON.parse(value); } catch { parsed = undefined; } if (parsed !== undefined && !numbersSurviveParsing(value)) parsed = undefined; }
+  if (typeof value === 'string') { try { parsed = JSON.parse(value); } catch { parsed = undefined; } if (parsed !== undefined && !jsonSurvivesParsing(value)) parsed = undefined; }
   const valid = expectedShape === 'array' ? Array.isArray(parsed) : expectedShape === 'integer-array' ? Array.isArray(parsed) && parsed.every((item) => Number.isSafeInteger(typeof item === 'number' ? item : Number(item))) : expectedShape === 'object' ? parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) : Array.isArray(parsed) || (parsed !== null && typeof parsed === 'object');
   if (valid) return parsed;
   const selected = choice?.choice ?? choice;

@@ -19,6 +19,7 @@ import { readArtifact } from './artifacts.mjs';
 import { Findings, compareSourceToTarget, comparePlanToTarget } from '../validate/compare.mjs';
 import { compareSourceToBundle } from '../validate/live-source.mjs';
 import { readLiveTarget } from '../validate/live-target.mjs';
+import { FilesystemObjectStore, readHandle } from '../external/filesystem-store.mjs';
 import { adapterFor } from './export.mjs';
 import { connectionFor } from './target.mjs';
 import { parseOptions, readJsonFile, refuseArgument, writeJsonNew } from './shared.mjs';
@@ -26,18 +27,33 @@ import { parseOptions, readJsonFile, refuseArgument, writeJsonNew } from './shar
 const { Client } = pg;
 const PHASE = 'validate';
 const REQUIRED = ['--bundle', '--decisions', '--plan', '--source-kind', '--source', '--target', '--migration-id', '--dry-run-receipt', '--import-receipt', '--out'];
-const OPTIONAL = ['--passphrase-file', '--image-plan', '--image-receipt', '--reembed-plan', '--reembed-receipts', '--trusted-public-key'];
+const OPTIONAL = ['--passphrase-file', '--image-plan', '--image-receipt', '--image-target-dir', '--reembed-plan', '--reembed-receipts', '--embedding-model', '--trusted-public-key'];
 const OPTION_NAMES = Object.freeze({
   '--bundle': 'bundlePath', '--decisions': 'decisionsPath', '--plan': 'planPath', '--source-kind': 'sourceKind', '--source': 'source', '--target': 'target',
   '--migration-id': 'migrationId', '--dry-run-receipt': 'dryRunReceiptPath', '--import-receipt': 'importReceiptPath', '--out': 'outPath',
-  '--passphrase-file': 'passphraseFile', '--image-plan': 'imagePlanPath', '--image-receipt': 'imageReceiptPath', '--reembed-plan': 'reembedPlanPath',
-  '--reembed-receipts': 'reembedReceiptsPath', '--trusted-public-key': 'trustedPublicKeyPath',
+  '--passphrase-file': 'passphraseFile', '--image-plan': 'imagePlanPath', '--image-receipt': 'imageReceiptPath', '--image-target-dir': 'imageTargetDir', '--reembed-plan': 'reembedPlanPath',
+  '--reembed-receipts': 'reembedReceiptsPath', '--embedding-model': 'embeddingModel', '--trusted-public-key': 'trustedPublicKeyPath',
 });
 
 export function parseValidateArgs(argv) {
   const values = parseOptions(PHASE, argv, { required: REQUIRED, optional: OPTIONAL });
   if (!['postgres', 'sqlite', 'd1-export'].includes(values['--source-kind'])) throw refuseArgument(PHASE, '--source-kind must be postgres, sqlite, or d1-export.');
+  if (values['--reembed-receipts'] !== undefined && values['--embedding-model'] === undefined) throw refuseArgument(PHASE, '--reembed-receipts needs --embedding-model: the receipts are held to the embedding model the v4 deployment is configured for, which only the operator can state.');
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [OPTION_NAMES[key], value]));
+}
+
+/**
+ * Reads, itself, every object the image inventory plans from the directory the operator says the images
+ * were copied to, and hashes it. A missing, unreadable or unsafe object is recorded as missing, never skipped.
+ */
+export function observeImageObjects(directory, inventory) {
+  let store;
+  try { store = new FilesystemObjectStore(directory); } catch { throw refuseArgument(PHASE, '--image-target-dir is missing or is not a real directory.'); }
+  const observed = {};
+  for (const entry of inventory.entries) {
+    try { const { sha256, size, mime } = readHandle(store.root, entry.target_key); observed[entry.target_key] = { sha256, size, mime }; } catch { observed[entry.target_key] = { missing: true }; }
+  }
+  return { observed };
 }
 
 function bindings(findings, name, receipt, plan) {
@@ -52,7 +68,7 @@ function bindings(findings, name, receipt, plan) {
  */
 export async function validateCommand(args) {
   const decisions = readJsonFile(PHASE, args.decisionsPath, 'The reviewed decision manifest');
-  const plan = readArtifact(PHASE, args.planPath, 'The relational staging plan', { kind: 'relational-plan', passphraseFile: args.passphraseFile });
+  const plan = readArtifact(PHASE, args.planPath, 'The relational staging plan', { kind: 'relational-plan', passphraseFile: args.passphraseFile, migrationId: args.migrationId });
   const dryRun = readJsonFile(PHASE, args.dryRunReceiptPath, 'The dry-run receipt');
   const importReceipt = readJsonFile(PHASE, args.importReceiptPath, 'The import receipt');
   const files = {
@@ -61,6 +77,8 @@ export async function validateCommand(args) {
     reembedPlan: args.reembedPlanPath ? readJsonFile(PHASE, args.reembedPlanPath, 'The re-embedding plan') : undefined,
     reembedReceipts: args.reembedReceiptsPath ? readJsonFile(PHASE, args.reembedReceiptsPath, 'The re-embedding receipts') : undefined,
     trustedPublicKey: undefined,
+    imageObjects: undefined,
+    embeddingModel: args.embeddingModel,
   };
   if (args.trustedPublicKeyPath) { try { files.trustedPublicKey = readFileSync(args.trustedPublicKeyPath, 'utf8'); } catch { throw refuseArgument(PHASE, 'The trusted public-key file is missing or unreadable.'); } }
   if (plan === null || typeof plan !== 'object' || plan.plan_type !== 'relational-staging' || typeof plan.members !== 'object') throw refuseArgument(PHASE, 'The plan file is not a plan-relational output.');
@@ -79,6 +97,8 @@ export async function validateCommand(args) {
   // 1. The reviewed decisions compile to the policy the plan was built from, and the plan is what that policy produces.
   const compiled = compilePolicy({ bundle, decisions }); // refuses unresolved, stale or invalid decisions
   const rebuilt = transformRelational({ bundle, compiledPolicy: compiled });
+  // what the tool itself sees of the copied image objects: only if the operator names the directory they were copied to
+  if (args.imageTargetDir !== undefined) files.imageObjects = observeImageObjects(args.imageTargetDir, rebuilt.image_inventory);
   if (plan.compiled_policy_sha256 !== compiled.plan_sha256) findings.add('plan-not-built-from-these-decisions', {});
   if (canonicalJson(rebuilt) !== canonicalJson(plan)) findings.add('plan-not-reproducible-from-bundle', {});
   if (plan.bundle_manifest_sha256 !== bundle.bundle_manifest_sha256 || plan.migration_id !== migrationId) findings.add('plan-not-bound-to-bundle', {});
@@ -140,7 +160,7 @@ export async function validateCommand(args) {
 
   // 5. Column by column: source -> target, and plan -> target.
   const sourceToTarget = compareSourceToTarget({ sourceTables: bundle.tables, targetTables: live.tables, compiled, decisions, importedAt: live.importedAt, family });
-  const planToTarget = comparePlanToTarget({ plan, targetTables: live.tables, columnTypes: live.columnTypes, importedAt: live.importedAt });
+  const planToTarget = comparePlanToTarget({ plan, targetTables: live.tables, columnTypes: live.columnTypes, columnDefaults: live.columnDefaults, importedAt: live.importedAt });
   const merge = (target, from) => { target.samples.push(...from.samples); for (const [check, count] of Object.entries(from.counts)) target.counts[check] = (target.counts[check] ?? 0) + count; };
 
   // 6. Cross-table invariants over the stored rows.
@@ -155,7 +175,7 @@ export async function validateCommand(args) {
   for (const id of plannedImages) if (!storedImages.has(id)) findings.add('inventoried-image-row-missing', {});
 
   // 7. External work: supplied evidence is validated; none supplied leaves the state pending, never ready.
-  const evidence = checkExternalEvidence({ derived: { members: rebuilt.members, imageInventory: rebuilt.image_inventory, reembedPlan: rebuilt.reembed_jobs }, files, migrationId, live: { tables: live.tables, columnTypes: live.columnTypes, importedAt: live.importedAt }, findings: external });
+  const evidence = checkExternalEvidence({ derived: { members: rebuilt.members, imageInventory: rebuilt.image_inventory, reembedPlan: rebuilt.reembed_jobs }, files, migrationId, live: { tables: live.tables, columnTypes: live.columnTypes, columnDefaults: live.columnDefaults, embeddingDimension: live.embeddingDimension, importedAt: live.importedAt }, findings: external });
 
   merge(findings, sourceToTarget.findings);
   merge(findings, planToTarget.findings);
@@ -169,6 +189,7 @@ export async function validateCommand(args) {
     format_version: 1,
     report_type: 'migration-reconciliation',
     validation_mode: 'live',
+    validated_at: new Date().toISOString(),
     migration_id: migrationId,
     bundle_manifest_sha256: bundle.bundle_manifest_sha256,
     decision_manifest_sha256: decisions.manifest_sha256,

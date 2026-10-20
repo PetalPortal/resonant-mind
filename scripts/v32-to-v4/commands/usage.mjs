@@ -25,7 +25,7 @@ export const COMMAND_GROUPS = Object.freeze([
     ['plan-reembed', ['--input <relational plan>', '--migration-id <id>', '--out <file>', '[--passphrase-file <file>]', '[--images <image plan>]', '[--bundle-manifest-sha256 <sha256>]', '[--compiled-policy-sha256 <sha256>]']],
   ]],
   ['Validation', [
-    ['validate', ['--bundle <dir>', '--decisions <reviewed file>', '--plan <file>', '--source-kind postgres|sqlite|d1-export', '--source <env:NAME | path>', '--target <env:NAME>', '--migration-id <id>', '--dry-run-receipt <file>', '--import-receipt <file>', '--out <file>', '[--passphrase-file <file>]', '[--image-plan <file> --image-receipt <file>]', '[--reembed-plan <file> --reembed-receipts <file>]', '[--trusted-public-key <file>]']],
+    ['validate', ['--bundle <dir>', '--decisions <reviewed file>', '--plan <file>', '--source-kind postgres|sqlite|d1-export', '--source <env:NAME | path>', '--target <env:NAME>', '--migration-id <id>', '--dry-run-receipt <file>', '--import-receipt <file>', '--out <file>', '[--passphrase-file <file>]', '[--image-plan <file> --image-receipt <file>]', '[--image-target-dir <dir>]', '[--reembed-plan <file> --reembed-receipts <file> --embedding-model <model>]', '[--trusted-public-key <file>]']],
     ['status', ['--report <validation report>', '[--passphrase-file <file>]', '[--cutover-evidence <file>]', '[--operator-cutover-ack]']],
   ]],
 ]);

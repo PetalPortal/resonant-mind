@@ -72,7 +72,23 @@ function verifyOfflineSignature(receipt, trustedPublicKey) {
   return true;
 }
 
-export function validateImageReceipt({ plan, receipt, migrationId = plan?.migration_id, requireSignature = receipt?.external_handoff === true, trustedPublicKey, trustedKey: configuredKey } = {}) {
+/**
+ * Whether an image receipt must carry a signature. The operator's invocation decides this, never the receipt
+ * (a receipt that says it is not an external handoff proves nothing about itself): the answer is yes unless
+ * the operator named the directory the objects were copied to, so that the tool re-reads and re-hashes every
+ * object itself (`toolObservedObjects`), and configured no trusted public key. A configured key always means
+ * a signature is required. An unsigned receipt therefore completes images only where the tool looked at the
+ * objects; anywhere else the copy can only be attested, and an attestation is a signature or nothing.
+ */
+export function imageSignatureRequired({ trustedPublicKey, toolObservedObjects = false } = {}) {
+  return !(toolObservedObjects === true && !trustedPublicKey);
+}
+
+/**
+ * `requireSignature` is the caller's decision (see imageSignatureRequired) and defaults to true: nothing in
+ * the receipt can switch it off.
+ */
+export function validateImageReceipt({ plan, receipt, migrationId = plan?.migration_id, requireSignature = true, trustedPublicKey, trustedKey: configuredKey } = {}) {
   if (!plan || plan.plan_type !== 'image-inventory' || typeof plan.plan_sha256 !== 'string' || planHash(plan) !== plan.plan_sha256) throw refuse('Image inventory plan hash is missing or invalid.');
   if (migrationId !== undefined && receipt?.migration_id !== migrationId) throw refuse('Image receipt migration identity does not match the requested migration.');
   if (receipt?.format_version !== FORMAT_VERSION || receipt?.receipt_type !== 'image-copy' || receipt?.status !== 'complete') throw refuse('External image receipt is not a complete versioned image-copy receipt.');
@@ -80,7 +96,7 @@ export function validateImageReceipt({ plan, receipt, migrationId = plan?.migrat
   if (plan.bundle_manifest_sha256 !== undefined && receipt.bundle_manifest_sha256 !== plan.bundle_manifest_sha256) throw refuse('Image receipt bundle binding does not match the image plan.');
   if (plan.compiled_policy_sha256 !== undefined && receipt.compiled_policy_sha256 !== plan.compiled_policy_sha256) throw refuse('Image receipt policy binding does not match the image plan.');
   if (receipt.receipt_sha256 !== undefined && receipt.receipt_sha256 !== receiptHash(receipt)) throw refuse('Image receipt hash is invalid.');
-  if (requireSignature) verifyOfflineSignature(receipt, trustedPublicKey ?? configuredKey);
+  if (requireSignature !== false) verifyOfflineSignature(receipt, trustedPublicKey ?? configuredKey);
   const expected = plan.entries ?? []; const entries = receipt.entries ?? receipt.objects;
   if (!Array.isArray(entries) || entries.length !== expected.length) throw refuse('External image receipt does not contain the complete planned object set.', { expected: expected.length });
   const byTarget = new Map();
@@ -96,7 +112,7 @@ export function validateImageReceipt({ plan, receipt, migrationId = plan?.migrat
     } catch { missing.push(item.target_key); }
   }
   if (missing.length || [...byTarget.keys()].some((key) => !expected.some((item) => item.target_key === key))) throw refuse('External image receipt does not cover every planned object with exact source and target bindings.', { missing: missing.length });
-  return { complete: true, covered: expected.length, receipt_sha256: receipt.receipt_sha256 ?? receiptHash(receipt), signature_verified: requireSignature };
+  return { complete: true, covered: expected.length, receipt_sha256: receipt.receipt_sha256 ?? receiptHash(receipt), signature_verified: requireSignature !== false };
 }
 export const planImages = buildImageInventory;
 export { sniffMime as mimeFor, planHash, receiptHash, verifyOfflineSignature };

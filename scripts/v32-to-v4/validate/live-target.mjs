@@ -29,6 +29,12 @@ async function applySessionSettings(client) {
   }
 }
 
+/** The dimension of the target's own embeddings.embedding column (vector(768) is 768), or null when it cannot be read. */
+export function embeddingDimensionOf(columnTypes) {
+  const match = /^vector\((\d+)\)$/u.exec(columnTypes?.embeddings?.embedding ?? '');
+  return match === null ? null : Number(match[1]);
+}
+
 /**
  * @param client   a connected pg client created with the exact-text type parsers (postgresClientConfig)
  * @param findings a Findings collector; live-database findings are added to it
@@ -71,8 +77,14 @@ export async function readLiveTarget({ client, migrationId, findings }) {
       if (orphans > 0) findings.add('foreign-key-orphans', { table: key.child, constraint: key.name, rows: orphans });
     }
 
-    // Unique and primary-key indexes: no duplicates among the stored rows.
-    const uniques = (await client.query("SELECT idx.relname::text AS name, tab.relname::text AS table_name, array_agg(att.attname::text ORDER BY k.ord) AS columns FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid JOIN pg_catalog.pg_class tab ON tab.oid = i.indrelid JOIN pg_catalog.pg_namespace n ON n.oid = tab.relnamespace CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) JOIN pg_catalog.pg_attribute att ON att.attrelid = i.indrelid AND att.attnum = k.attnum WHERE n.nspname = 'public' AND i.indisunique AND i.indpred IS NULL AND i.indexprs IS NULL AND k.attnum > 0 GROUP BY idx.relname, tab.relname ORDER BY tab.relname, idx.relname")).rows;
+    // Unique and primary-key indexes: no duplicates among the stored rows. The check groups by the index's key
+    // columns, which only says what a plain unique index means. A unique index that is partial (it has a
+    // predicate) or built on an expression means something else, and the validator will not run text from the
+    // target's catalog to find out what; the released v4 schema has none, so one is a finding, like an
+    // unexpected CHECK, and is not evaluated.
+    const oddUniques = (await client.query("SELECT idx.relname::text AS name, tab.relname::text AS table_name, (i.indpred IS NOT NULL) AS partial, (i.indexprs IS NOT NULL) AS expression FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid JOIN pg_catalog.pg_class tab ON tab.oid = i.indrelid JOIN pg_catalog.pg_namespace n ON n.oid = tab.relnamespace WHERE n.nspname = 'public' AND i.indisunique AND (i.indpred IS NOT NULL OR i.indexprs IS NOT NULL) ORDER BY tab.relname, idx.relname")).rows;
+    for (const row of oddUniques) findings.add('unique-index-unexpected', { table: row.table_name, index: row.name, reason: row.partial ? 'partial-not-in-the-released-schema' : 'expression-not-in-the-released-schema' });
+    const uniques = (await client.query("SELECT idx.relname::text AS name, tab.relname::text AS table_name, array_agg(att.attname::text ORDER BY k.ord) AS columns FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid JOIN pg_catalog.pg_class tab ON tab.oid = i.indrelid JOIN pg_catalog.pg_namespace n ON n.oid = tab.relnamespace CROSS JOIN LATERAL unnest(i.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) JOIN pg_catalog.pg_attribute att ON att.attrelid = i.indrelid AND att.attnum = k.attnum WHERE n.nspname = 'public' AND i.indisunique AND i.indpred IS NULL AND i.indexprs IS NULL AND k.attnum > 0 AND k.ord <= i.indnkeyatts GROUP BY idx.relname, tab.relname ORDER BY tab.relname, idx.relname")).rows;
     let uniquesChecked = 0;
     for (const unique of uniques) {
       const columns = unique.columns.map(quote).join(', ');
@@ -100,6 +112,9 @@ export async function readLiveTarget({ client, migrationId, findings }) {
     // Column types, to know which text columns are really json, and every row of every migrated table.
     const columnTypes = {};
     for (const row of (await client.query("SELECT c.relname::text AS table_name, a.attname::text AS column_name, pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped")).rows) (columnTypes[row.table_name] ??= {})[row.column_name] = row.data_type;
+    // What fills a column the plan does not state: its default (as the catalog prints it, never evaluated here), or the database computing it.
+    const columnDefaults = {};
+    for (const row of (await client.query("SELECT c.relname::text AS table_name, a.attname::text AS column_name, pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default, (a.attgenerated::text <> '') AS generated, (a.attidentity::text <> '') AS identity FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped")).rows) (columnDefaults[row.table_name] ??= {})[row.column_name] = { default: row.column_default, generated: row.generated, identity: row.identity };
     const tables = {};
     for (const table of COMPARED_TARGET_TABLES) {
       if (!columnTypes[table]) { findings.add('target-table-missing', { table }); tables[table] = []; continue; }
@@ -129,6 +144,8 @@ export async function readLiveTarget({ client, migrationId, findings }) {
       ledger,
       tables,
       columnTypes,
+      columnDefaults,
+      embeddingDimension: embeddingDimensionOf(columnTypes),
       checks: { constraints: constraints.length, foreign_keys: foreignKeysChecked, unique_indexes: uniquesChecked, check_constraints: checksChecked, check_constraints_unexpected: classified.unexpected.length, indexes: indexes.length, sequences },
     };
   } finally {

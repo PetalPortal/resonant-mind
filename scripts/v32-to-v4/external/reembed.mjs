@@ -32,7 +32,15 @@ function targetHashFor(job, targetRows) { if (!targetRows) return null; const ro
 function planHash(plan) { const copy = { ...plan }; delete copy.plan_sha256; return canonicalSha256(copy); }
 function exactLocator(left, right) { return left?.table === right?.table && String(left?.id) === String(right?.id); }
 
+/**
+ * What the receipts are held to. Re-embedding happens outside this tool, so the receipts can only ever be
+ * attested, never observed; what the tool can do is hold them to the configuration the v4 target has. So
+ * `expectedModel` (the embedding model the v4 deployment is configured for, which the operator states) and
+ * `expectedDimension` (the dimension of the target's own embeddings.embedding column, which validate reads)
+ * are required: a receipt set that only agrees with itself on a model and a dimension is refused.
+ */
 export function validateReembedReceipts({ plan, receipts, targetRows, expectedModel, expectedDimension, migrationId = plan?.migration_id, bundleManifestSha256 = plan?.bundle_manifest_sha256, compiledPolicySha256 = plan?.compiled_policy_sha256 } = {}) {
+  if (typeof expectedModel !== 'string' || expectedModel.length === 0 || !Number.isSafeInteger(expectedDimension) || expectedDimension < 1) throw refuse('Re-embedding receipts can only be checked against the embedding model and dimension the v4 target is configured for; both are required.');
   if (!plan || plan.plan_type !== 'reembed-job-plan' || plan.plan_sha256 !== planHash(plan)) throw refuse('Re-embedding job plan hash is missing or invalid.');
   if (plan.legacy_vectors_imported === true) throw refuse('Legacy vectors are present in the re-embedding plan.');
   const envelope = Array.isArray(receipts) ? {} : receipts ?? {}; const rows = receiptRows(receipts); if (envelope.format_version !== FORMAT_VERSION || !Array.isArray(envelope.receipts)) throw refuse('Re-embedding receipts require a versioned envelope, not a weak JSON list.');
@@ -57,7 +65,7 @@ export function validateReembedReceipts({ plan, receipts, targetRows, expectedMo
     const model = receipt.model ?? receipt.model_id; const dimension = receipt.dimension ?? receipt.vector_dimension;
     if (typeof model !== 'string' || model.length === 0) problems.push({ job_id: job.job_id, reason: 'model-missing' }); else if (receiptModel === undefined) receiptModel = model; else if (receiptModel !== model) problems.push({ job_id: job.job_id, reason: 'model-inconsistent' });
     if (!Number.isSafeInteger(dimension) || dimension < 1) problems.push({ job_id: job.job_id, reason: 'dimension-missing' }); else if (receiptDimension === undefined) receiptDimension = dimension; else if (receiptDimension !== dimension) problems.push({ job_id: job.job_id, reason: 'dimension-inconsistent' });
-    if (expectedModel !== undefined && model !== expectedModel) problems.push({ job_id: job.job_id, reason: 'model-mismatch' }); if (expectedDimension !== undefined && dimension !== expectedDimension) problems.push({ job_id: job.job_id, reason: 'dimension-mismatch' });
+    if (model !== expectedModel) problems.push({ job_id: job.job_id, reason: 'model-mismatch' }); if (dimension !== expectedDimension) problems.push({ job_id: job.job_id, reason: 'dimension-mismatch' });
     const targetHash = targetHashFor(job, targetRows); if (targetRows && targetHash !== job.content_hash) problems.push({ job_id: job.job_id, reason: targetHash === null ? 'target-row-missing' : 'target-content-changed' });
     completed.push(job.job_id);
   }

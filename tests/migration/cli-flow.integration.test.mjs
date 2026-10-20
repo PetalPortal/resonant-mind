@@ -118,7 +118,8 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
           const emptyEvidence = step('validate with an empty image plan', validateArgs({ ...common, out: 'validation-empty-images.json', extra: ['--image-plan', file('image-plan-empty.json'), '--image-receipt', file('image-receipt-empty.json')] }), env, 2);
           outputs.push(emptyEvidence.output);
           const emptyReport = JSON.parse(readFileSync(file('validation-empty-images.json'), 'utf8'));
-          expect(Object.keys(emptyReport.violation_counts).sort()).toEqual(['external-image-plan-not-the-planned-inventory', 'image-row-not-in-image-plan']);
+          // (and its receipt is unsigned, with no trusted key and no directory the tool could re-hash: nothing can make that complete)
+          expect(Object.keys(emptyReport.violation_counts).sort()).toEqual(['external-image-plan-not-the-planned-inventory', 'external-image-receipt-invalid', 'image-row-not-in-image-plan']);
           expect(emptyReport).toMatchObject({ status: 'refused', images_complete: false });
 
           // Each kind of damage is found, by a check that names it. A clone of the migrated target is damaged
@@ -240,19 +241,34 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
         // The external provider's work, as the operator supplies it: a job plan from the CLI and a receipt for every job.
         step('plan-reembed', ['plan-reembed', '--input', file('plan.json'), '--passphrase-file', file('passphrase'), '--migration-id', migrationId, '--bundle-manifest-sha256', hashes.bundle_manifest_sha256, '--compiled-policy-sha256', hashes.compiled_policy_sha256, '--out', file('reembed-plan.json')], env);
         const reembedPlan = JSON.parse(readFileSync(file('reembed-plan.json'), 'utf8'));
-        const receipts = (planOf, model = 'synthetic-model') => ({ format_version: 1, migration_id: migrationId, plan_sha256: planOf.plan_sha256, bundle_manifest_sha256: hashes.bundle_manifest_sha256, compiled_policy_sha256: hashes.compiled_policy_sha256, receipts: planOf.jobs.map((job) => ({ job_id: job.job_id, migration_id: migrationId, plan_sha256: planOf.plan_sha256, bundle_manifest_sha256: hashes.bundle_manifest_sha256, compiled_policy_sha256: hashes.compiled_policy_sha256, target_locator: job.target_locator, status: 'complete', model, dimension: 3, content_hash: job.content_hash })) });
+        const receipts = (planOf, model = 'synthetic-model', dimension = 768) => ({ format_version: 1, migration_id: migrationId, plan_sha256: planOf.plan_sha256, bundle_manifest_sha256: hashes.bundle_manifest_sha256, compiled_policy_sha256: hashes.compiled_policy_sha256, receipts: planOf.jobs.map((job) => ({ job_id: job.job_id, migration_id: migrationId, plan_sha256: planOf.plan_sha256, bundle_manifest_sha256: hashes.bundle_manifest_sha256, compiled_policy_sha256: hashes.compiled_policy_sha256, target_locator: job.target_locator, status: 'complete', model, dimension, content_hash: job.content_hash })) });
         const incomplete = receipts(reembedPlan);
         incomplete.receipts.pop();
         writeFileSync(file('reembed-receipts-incomplete.json'), JSON.stringify(incomplete));
-        const refused = step('validate with incomplete receipts', validateArgs({ ...common, out: 'validation-incomplete.json', extra: ['--reembed-plan', file('reembed-plan.json'), '--reembed-receipts', file('reembed-receipts-incomplete.json')] }), env, 2);
+        const refused = step('validate with incomplete receipts', validateArgs({ ...common, out: 'validation-incomplete.json', extra: ['--reembed-plan', file('reembed-plan.json'), '--reembed-receipts', file('reembed-receipts-incomplete.json'), '--embedding-model', 'synthetic-model'] }), env, 2);
         expect(Object.keys(JSON.parse(readFileSync(file('validation-incomplete.json'), 'utf8')).violation_counts)).toEqual(['external-reembed-receipt-invalid']);
         expect(refused.stderr).toContain('RMIG-E-VALIDATION');
 
         writeFileSync(file('reembed-receipts.json'), JSON.stringify(receipts(reembedPlan)));
-        const ready = step('validate with receipts', validateArgs({ ...common, out: 'validation-ready.json', extra: ['--reembed-plan', file('reembed-plan.json'), '--reembed-receipts', file('reembed-receipts.json')] }), env);
+        const ready = step('validate with receipts', validateArgs({ ...common, out: 'validation-ready.json', extra: ['--reembed-plan', file('reembed-plan.json'), '--reembed-receipts', file('reembed-receipts.json'), '--embedding-model', 'synthetic-model'] }), env);
         expect(ready.stdout).toMatch(/^validate: status=ready-for-cutover;/u);
         const status = step('status', ['status', '--report', file('validation-ready.json'), '--passphrase-file', file('passphrase')], env);
         expect(status.stdout).toMatch(/^status: ready-for-cutover;/u);
+        // status says what it read and what it rests on: the re-embedding is the embedder's word, not something the tool observed
+        expect(status.stdout).toContain('not a check of the target now');
+        expect(status.stdout).toContain('reembedding=attested-by-receipts (attested by receipts, not observed)');
+        const readyReport = JSON.parse(readFileSync(file('validation-ready.json'), 'utf8'));
+        expect(readyReport).toMatchObject({ reembed: { complete: true, basis: 'receipts-attested', observed_by_tool: false, held_to_model: 'synthetic-model', held_to_dimension: 768 }, validated_at: expect.any(String) });
+
+        // Receipts are held to the model the operator states and to the dimension of the target's own embeddings column (vector(768)).
+        const otherModel = step('validate with the wrong model', validateArgs({ ...common, out: 'validation-model.json', extra: ['--reembed-plan', file('reembed-plan.json'), '--reembed-receipts', file('reembed-receipts.json'), '--embedding-model', 'another-model'] }), env, 2);
+        expect(otherModel.stderr).toContain('RMIG-E-VALIDATION');
+        expect(JSON.parse(readFileSync(file('validation-model.json'), 'utf8')).violations[0]).toMatchObject({ check: 'external-reembed-receipt-invalid', reasons: 'model-mismatch' });
+        writeFileSync(file('reembed-receipts-dim3.json'), JSON.stringify(receipts(reembedPlan, 'synthetic-model', 3)));
+        step('validate with the wrong dimension', validateArgs({ ...common, out: 'validation-dimension.json', extra: ['--reembed-plan', file('reembed-plan.json'), '--reembed-receipts', file('reembed-receipts-dim3.json'), '--embedding-model', 'synthetic-model'] }), env, 2);
+        expect(JSON.parse(readFileSync(file('validation-dimension.json'), 'utf8')).violations[0]).toMatchObject({ check: 'external-reembed-receipt-invalid', reasons: 'dimension-mismatch' });
+        const noModel = step('validate without a stated model', validateArgs({ ...common, out: 'validation-nomodel.json', extra: ['--reembed-plan', file('reembed-plan.json'), '--reembed-receipts', file('reembed-receipts.json')] }), env, 2);
+        expect(noModel.stderr).toContain('--embedding-model');
 
         // A job plan that is not the one these imported rows produce is not accepted, receipts or not.
         const foreign = { ...reembedPlan, jobs: reembedPlan.jobs.slice(1), searchable_job_count: reembedPlan.jobs.length - 1 };
@@ -260,7 +276,7 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
         foreign.plan_sha256 = canonicalSha256(foreign);
         writeFileSync(file('reembed-plan-foreign.json'), JSON.stringify(foreign));
         writeFileSync(file('reembed-receipts-foreign.json'), JSON.stringify(receipts(foreign)));
-        step('validate a foreign job plan', validateArgs({ ...common, out: 'validation-foreign.json', extra: ['--reembed-plan', file('reembed-plan-foreign.json'), '--reembed-receipts', file('reembed-receipts-foreign.json')] }), env, 2);
+        step('validate a foreign job plan', validateArgs({ ...common, out: 'validation-foreign.json', extra: ['--reembed-plan', file('reembed-plan-foreign.json'), '--reembed-receipts', file('reembed-receipts-foreign.json'), '--embedding-model', 'synthetic-model'] }), env, 2);
         expect(Object.keys(JSON.parse(readFileSync(file('validation-foreign.json'), 'utf8')).violation_counts)).toEqual(['reembed-plan-not-derived-from-imported-rows']);
 
         assertNoSecrets({ outputs, root: work, secrets: [targetUrl, targetBase, new URL(targetBase).password], expect });
