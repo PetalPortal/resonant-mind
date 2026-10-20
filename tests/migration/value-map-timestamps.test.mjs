@@ -31,4 +31,11 @@ describe('timestamp normalization keeps the instant the source stored', () => {
     expect(normalizeTimestamp('2026-01-02T03:04:05.654321', { choice })).toBe('2026-01-02T01:04:05.654321Z');
     expect(() => normalizeTimestamp('2026-01-02T03:04:05.654321')).toThrow(/ambiguous/u);
   });
+
+  it('keeps the fraction of a space-separated value as well as a T-separated one (the form PostgreSQL itself prints)', () => {
+    const choice = { action: 'normalize-utc', timezone: '+02:00' };
+    expect(normalizeTimestamp('2026-01-02 03:04:05.654321', { choice })).toBe('2026-01-02T01:04:05.654321Z');
+    expect(normalizeTimestamp('2026-01-02 03:04:05.654321', { choice: { action: 'normalize-utc', timezone: 'UTC' } })).toBe('2026-01-02T03:04:05.654321Z');
+    expect(() => normalizeTimestamp('2026-01-02 03:04:05.1234567', { choice })).toThrow(/microsecond/u);
+  });
 });

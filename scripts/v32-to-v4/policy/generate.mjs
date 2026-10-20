@@ -37,8 +37,11 @@ const JSON_SHAPES = new Map([
   ['links', 'array'], ['connections', 'array'], ['tags', 'array'], ['source_observation_ids', 'integer-array'],
   ['data', 'object'], ['sit_notes', 'array-or-object'],
 ]);
-const TIMESTAMP_FIELDS = new Set(['entities.created_at','entities.updated_at','observations.added_at','observations.last_surfaced_at','observations.resolved_at','observations.valid_from','observations.valid_until','observation_versions.changed_at','relations.created_at','threads.created_at','threads.updated_at','threads.resolved_at','context_entries.updated_at','relational_state.timestamp','identity.timestamp','journals.created_at','consolidation_groups.created_at','images.created_at','images.last_accessed_at','images.last_surfaced_at','images.archived_at','subconscious.updated_at','daemon_proposals.proposed_at','daemon_proposals.resolved_at','tensions.created_at','tensions.resolved_at','dormant_observations.first_marked','dormant_observations.last_rescue_attempt','co_surfacing.first_co_surfaced','co_surfacing.last_co_surfaced']);
-const DATE_FIELDS = new Set(['observations.source_date']);
+// Every v3.2 column that holds a point in time. This is the single list: the decision draft uses it to
+// find ambiguous values and the value map uses it to normalize them, and a test checks it against both
+// exact source specs, so a column cannot be listed in one place and missed in the other.
+export const TIMESTAMP_FIELDS = new Set(['entities.created_at','entities.updated_at','observations.added_at','observations.last_surfaced_at','observations.archived_at','observations.last_accessed_at','observations.resolved_at','observations.valid_from','observations.valid_until','observation_versions.changed_at','relations.created_at','threads.created_at','threads.updated_at','threads.resolved_at','context_entries.updated_at','relational_state.timestamp','identity.timestamp','journals.created_at','consolidation_groups.created_at','images.created_at','images.last_accessed_at','images.last_surfaced_at','images.archived_at','subconscious.updated_at','daemon_proposals.proposed_at','daemon_proposals.resolved_at','tensions.created_at','tensions.resolved_at','dormant_observations.first_marked','dormant_observations.last_rescue_attempt','co_surfacing.last_co_surfaced']);
+export const DATE_FIELDS = new Set(['observations.source_date']);
 const FK_FIELDS = new Map([
   ['observations', new Map([['entity_id', 'entities'], ['linked_observation_id', 'observations'], ['superseded_by', 'observations'], ['supersedes', 'observations']])],
   ['observation_versions', new Map([['observation_id', 'observations']])],

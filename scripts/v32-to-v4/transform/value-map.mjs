@@ -1,6 +1,6 @@
 import { canonicalJson } from '../lib/canonical-json.mjs';
 import { canonicalSha256 } from '../lib/hash.mjs';
-import { KIND_NORMALIZATIONS, ISO_WITH_OFFSET, SQLITE_UTC, choiceForItem } from '../policy/generate.mjs';
+import { KIND_NORMALIZATIONS, ISO_WITH_OFFSET, SQLITE_UTC, TIMESTAMP_FIELDS, DATE_FIELDS, choiceForItem } from '../policy/generate.mjs';
 import { choiceAction } from './id-map.mjs';
 
 const ENUMS = {
@@ -20,8 +20,6 @@ const ALIASES = {
   thread_type: { 'urgent-task':'task', build:'task', maintenance:'task', pickup:'task', deadline:'task', morning_handoff:'handoff', 'morning-handoff':'handoff', question:'explore', research:'explore', project_seed:'idea', work:'project', infrastructure:'project', anniversary:'relational', personal:'relational' },
 };
 const CONTEXTS = new Set(['default', 'primary', 'private', 'public', 'personal', 'relationship', 'work', 'inner', 'dream', 'archive', 'archived', 'system', 'global', 'emotional-processing', 'interests-curiosities', 'creative-space', 'relational-models', 'episodic', 'values-ethics', 'research']);
-const TIMESTAMP_FIELDS = new Set(['entities.created_at','entities.updated_at','observations.added_at','observations.last_surfaced_at','observations.resolved_at','observations.valid_from','observations.valid_until','observation_versions.changed_at','relations.created_at','threads.created_at','threads.updated_at','threads.resolved_at','context_entries.updated_at','relational_state.timestamp','identity.timestamp','journals.created_at','consolidation_groups.created_at','images.created_at','images.last_accessed_at','images.last_surfaced_at','images.archived_at','subconscious.updated_at','daemon_proposals.proposed_at','daemon_proposals.resolved_at','tensions.created_at','tensions.resolved_at','dormant_observations.first_marked','dormant_observations.last_rescue_attempt','co_surfacing.first_co_surfaced','co_surfacing.last_co_surfaced']);
-const DATE_FIELDS = new Set(['observations.source_date']);
 const ENUM_FIELDS = new Set(['observations.salience', 'observations.weight', 'observations.certainty', 'observations.charge', 'observations.source', 'threads.thread_type', 'threads.status', 'threads.priority', 'relational_state.intensity']);
 function action(choice) { return choiceAction(choice); }
 function missing(value) { return value === null || value === undefined || value === ''; }
@@ -34,7 +32,7 @@ function policyChoice(policy, row, table, type, field) { const rowHash = canonic
 // cannot come from PostgreSQL and is refused rather than rounded.
 function utcIso(date, text) {
   const iso = date.toISOString();
-  const fraction = /T\d{2}:\d{2}:\d{2}\.(\d+)/u.exec(text)?.[1] ?? '';
+  const fraction = /[T ]\d{2}:\d{2}:\d{2}\.(\d+)/u.exec(text)?.[1] ?? '';
   if (fraction.length <= 3) return iso;
   if (/[1-9]/u.test(fraction.slice(6))) throw new Error('Timestamp has more than microsecond precision and would be rounded.');
   const micro = fraction.slice(0, 6).padEnd(6, '0');
@@ -49,7 +47,7 @@ export function normalizeTimestamp(value, { choice, table, field } = {}) {
   if (action(selected) !== 'normalize-utc') throw new Error(`Timestamp ${table ?? 'row'}.${field ?? 'value'} is ambiguous.`);
   const timezone = selected?.timezone ?? selected?.timezone_offset;
   if (typeof timezone !== 'string' || !/^(?:UTC|Z|[+-]\d{2}:?\d{2})$/u.test(timezone)) throw new Error('Naive timestamps require an explicit reviewed timezone.');
-  const date = new Date(`${value}${timezone === 'UTC' || timezone === 'Z' ? 'Z' : timezone}`); if (Number.isNaN(date.valueOf())) throw new Error('Reviewed timestamp choice does not produce a valid timestamp.');
+  const date = new Date(`${value.replace(' ', 'T')}${timezone === 'UTC' || timezone === 'Z' ? 'Z' : timezone}`); if (Number.isNaN(date.valueOf())) throw new Error('Reviewed timestamp choice does not produce a valid timestamp.');
   return utcIso(date, value);
 }
 export function normalizeDate(value, { choice, table, field } = {}) {

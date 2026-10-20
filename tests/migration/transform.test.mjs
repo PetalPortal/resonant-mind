@@ -93,6 +93,14 @@ function allValues(value, callback) { callback(value); if (Array.isArray(value))
     expect(MAP.find((item) => item.source_table === 'observations').dropped_fields).toEqual(expect.arrayContaining([expect.objectContaining({ field: 'charge_note' })]));
   });
 
+  it('states truthfully why charge_note is dropped: v3.2 creates it and v4 has no column for it', () => {
+    const dropped = MAP.find((item) => item.source_table === 'observations').dropped_fields.find((item) => item.field === 'charge_note');
+    expect(dropped.rationale).toMatch(/v3.2 schema[^.]*creates observations.charge_note/u);
+    expect(dropped.rationale).toMatch(/v4[^.]*no such column/u);
+    expect(dropped.rationale).not.toMatch(/never create/u);
+    for (const kind of ['postgres', 'sqlite']) expect(sourceSpecFor(kind).tables.find((table) => table.name === 'observations').columns.map((column) => column.name)).toContain('charge_note');
+  });
+
   it('emits an exact v4-shaped golden plan for every SQLite mapping', () => {
     const bundle = sourceFixture();
     const plan = compilePolicy({ bundle, decisions: reviewed(bundle) });
