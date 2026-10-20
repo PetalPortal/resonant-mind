@@ -10,9 +10,37 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const SCHEMA = 'public';
 const TABLES = new Set(sourceSpecFor('postgres').tables.map(({ name }) => name));
 
+// node-pg turns timestamptz, timestamp and date into JavaScript Dates, which round microseconds
+// away and are not plain data for the bundle's canonical JSON. The source keeps PostgreSQL's own
+// text instead: the session is UTC with ISO dates (SOURCE_SESSION_OPTIONS), a timestamptz becomes
+// the same instant in RFC 3339 with nothing rounded, and a naive timestamp or a date stays as
+// PostgreSQL wrote it, for the reviewed policy to decide.
+const OID = Object.freeze({ date: 1082, timestamp: 1114, timestamptz: 1184 });
+export const SOURCE_SESSION_OPTIONS = '-c TimeZone=UTC -c DateStyle=ISO,YMD';
+
+/** PostgreSQL's ISO timestamptz text as RFC 3339, digit for digit; anything else is returned as it was. */
+export function rfc3339FromPostgres(text) {
+  const match = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(?:\.(\d{1,6}))?([+-]\d{2})(?::(\d{2}))?$/u.exec(text);
+  if (!match) return text;
+  const [, day, time, fraction, hours, minutes = '00'] = match;
+  const offset = hours === '+00' && minutes === '00' ? 'Z' : `${hours}:${minutes}`;
+  return `${day}T${time}${fraction ? `.${fraction.padEnd(3, '0')}` : ''}${offset}`;
+}
+
+function sourceTypes() {
+  const { types } = require('pg');
+  return {
+    getTypeParser(oid, format) {
+      if (oid === OID.timestamptz) return rfc3339FromPostgres;
+      if (oid === OID.timestamp || oid === OID.date) return (value) => value;
+      return types.getTypeParser(oid, format);
+    },
+  };
+}
+
 export const POSTGRES_CATALOG_QUERIES = Object.freeze({
   columns: `SELECT c.relname AS table_name, a.attname AS column_name, format_type(a.atttypid, a.atttypmod) AS data_type, a.attnotnull AS not_null, pg_get_expr(d.adbin, d.adrelid) AS column_default, a.attnum AS ordinal_position FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE n.nspname = $1 AND c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped ORDER BY c.relname, a.attnum`,
-  constraints: `SELECT c.conname AS constraint_name, c.contype AS constraint_type, rel.relname AS table_name, array_agg(att.attname ORDER BY key.ord) AS columns, refrel.relname AS referenced_table, array_agg(refatt.attname ORDER BY key.ord) AS referenced_columns, c.confdeltype AS delete_action, c.confupdtype AS update_action FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_class rel ON rel.oid = c.conrelid JOIN pg_catalog.pg_namespace n ON n.oid = rel.relnamespace CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS key(attnum, ord) JOIN pg_catalog.pg_attribute att ON att.attrelid = c.conrelid AND att.attnum = key.attnum LEFT JOIN pg_catalog.pg_class refrel ON refrel.oid = c.confrelid LEFT JOIN LATERAL unnest(c.confkey) WITH ORDINALITY AS refkey(attnum, ord) ON refkey.ord = key.ord LEFT JOIN pg_catalog.pg_attribute refatt ON refatt.attrelid = c.confrelid AND refatt.attnum = refkey.attnum WHERE n.nspname = $1 AND c.contype IN ('p', 'u', 'f') GROUP BY c.conname, c.contype, rel.relname, refrel.relname, c.confdeltype, c.confupdtype ORDER BY rel.relname, c.conname`,
+  constraints: `SELECT c.conname AS constraint_name, c.contype AS constraint_type, rel.relname AS table_name, array_agg(att.attname::text ORDER BY key.ord) AS columns, refrel.relname AS referenced_table, array_agg(refatt.attname::text ORDER BY key.ord) AS referenced_columns, c.confdeltype AS delete_action, c.confupdtype AS update_action FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_class rel ON rel.oid = c.conrelid JOIN pg_catalog.pg_namespace n ON n.oid = rel.relnamespace CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS key(attnum, ord) JOIN pg_catalog.pg_attribute att ON att.attrelid = c.conrelid AND att.attnum = key.attnum LEFT JOIN pg_catalog.pg_class refrel ON refrel.oid = c.confrelid LEFT JOIN LATERAL unnest(c.confkey) WITH ORDINALITY AS refkey(attnum, ord) ON refkey.ord = key.ord LEFT JOIN pg_catalog.pg_attribute refatt ON refatt.attrelid = c.confrelid AND refatt.attnum = refkey.attnum WHERE n.nspname = $1 AND c.contype IN ('p', 'u', 'f') GROUP BY c.conname, c.contype, rel.relname, refrel.relname, c.confdeltype, c.confupdtype ORDER BY rel.relname, c.conname`,
   checks: `SELECT c.conname AS constraint_name, rel.relname AS table_name, pg_get_constraintdef(c.oid) AS expression FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_class rel ON rel.oid = c.conrelid JOIN pg_catalog.pg_namespace n ON n.oid = rel.relnamespace WHERE n.nspname = $1 AND c.contype = 'c' ORDER BY rel.relname, c.conname`,
   indexes: `SELECT tab.relname AS table_name, idx.relname AS index_name, i.indisunique AS is_unique, am.amname AS index_method, pg_get_indexdef(i.indexrelid) AS definition, pg_get_expr(i.indpred, i.indrelid) AS predicate FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class idx ON idx.oid = i.indexrelid JOIN pg_catalog.pg_class tab ON tab.oid = i.indrelid JOIN pg_catalog.pg_namespace n ON n.oid = tab.relnamespace JOIN pg_catalog.pg_am am ON am.oid = idx.relam WHERE n.nspname = $1 ORDER BY tab.relname, idx.relname`,
   identity: `SELECT current_database() AS database_name, (SELECT oid::text FROM pg_catalog.pg_database WHERE datname = current_database()) AS database_oid, inet_server_addr()::text AS server_address, inet_server_port()::text AS server_port, current_setting('server_version_num') AS server_version`,
@@ -166,7 +194,7 @@ export class PostgresV32Adapter {
     this.#connectionString = value;
     this.#clientFactory = clientFactory ?? ((connectionString) => {
       const { Client } = require('pg');
-      return new Client({ connectionString });
+      return new Client({ connectionString, types: sourceTypes(), options: SOURCE_SESSION_OPTIONS });
     });
     this.#batchSize = batchSize;
     this.#client = null;

@@ -62,9 +62,9 @@ export const TARGET_OBJECT_QUERY = `
       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = t.oid AND d.deptype = 'e')
   )
   SELECT true AS inventory_complete,
-         COALESCE((SELECT array_agg(nspname ORDER BY nspname) FROM user_schemas), ARRAY[]::text[]) AS schemas,
-         COALESCE((SELECT array_agg(extname ORDER BY extname) FROM extension_list), ARRAY[]::text[]) AS extensions,
-         COALESCE((SELECT array_agg(schema_name ORDER BY schema_name) FROM extension_list WHERE extname = 'vector'), ARRAY[]::text[]) AS vector_schemas,
+         COALESCE((SELECT array_agg(nspname::text ORDER BY nspname) FROM user_schemas), ARRAY[]::text[]) AS schemas,
+         COALESCE((SELECT array_agg(extname::text ORDER BY extname) FROM extension_list), ARRAY[]::text[]) AS extensions,
+         COALESCE((SELECT array_agg(schema_name::text ORDER BY schema_name) FROM extension_list WHERE extname = 'vector'), ARRAY[]::text[]) AS vector_schemas,
          (SELECT count(*)::text FROM app_objects) AS object_count,
          COALESCE((SELECT jsonb_agg(jsonb_build_object('schema', schema_name, 'name', object_name, 'kind', object_kind) ORDER BY schema_name, object_kind, object_name) FROM app_objects), '[]'::jsonb) AS objects
 `;
