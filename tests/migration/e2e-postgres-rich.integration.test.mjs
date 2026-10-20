@@ -11,6 +11,7 @@ import { transformRelational } from '../../scripts/v32-to-v4/transform/relationa
 import { inspectTarget, prepareTarget, dryRunStaging, importPlan, readTargetIdentity } from '../../scripts/v32-to-v4/target/postgres.mjs';
 import { createV4MigrationRunner } from '../../scripts/migrate-postgres.mjs';
 import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
+import { LONG, RICH_POSTGRES_SEED as SEED } from './helpers/seeds.mjs';
 
 // A second, richer live run than e2e-postgres.integration.test.mjs: every v3.2 table has rows, with
 // the awkward values real databases hold (microsecond timestamps, a non-UTC offset, NULLs, unicode,
@@ -22,55 +23,6 @@ const fixture = join(repo, 'tests', 'fixtures', 'migration', 'v3.2', 'postgres.s
 const adminUrl = process.env.TEST_ADMIN_DATABASE_URL;
 const runE2E = typeof adminUrl === 'string' && adminUrl.length > 0;
 const quoteIdentifier = (value) => `"${value.replaceAll('"', '""')}"`;
-const LONG = `${'long line with "quotes", \'apostrophes\', back\\slash and unicode ☃ \u{1F33F}\n'.repeat(200)}end`;
-
-const SEED = `
-INSERT INTO entities (id, name, entity_type, primary_context, salience, intentionally_isolated, created_at, updated_at) VALUES
-  (1, 'Rich Person One', 'person', 'default', 'foundational', 0, '2026-01-02 03:04:05.123456+00', '2026-01-03 03:04:05+00'),
-  (2, 'Rich Person Two', 'person', 'default', 'active', 0, '2026-01-02 03:04:06.5+00', NULL),
-  (7, 'Garden ☃ naïve', 'concept', 'default', 'active', 1, '2026-02-01 12:00:00+01', '2026-02-01 12:00:00+01');
-INSERT INTO observations (id, entity_id, content, salience, emotion, weight, certainty, source, source_date, context, charge, charge_note, sit_count, novelty_score, last_surfaced_at, surface_count, archived_at, added_at, resolved_at, resolution_note, linked_observation_id, access_count, last_accessed_at, valid_from, valid_until, superseded_by, supersedes) VALUES
-  (3, 1, $$${LONG}$$, 'active', 'warm', 'heavy', 'known', 'conversation', '2026-01-02', 'default', 'processing', 'a note', 2, 0.25, '2026-03-01 00:00:00.000001+00', 4, NULL, '2026-01-02 04:00:00.987654+00', NULL, NULL, NULL, 9, '2026-03-02 10:00:00+00', '2026-01-01 00:00:00+00', NULL, NULL, NULL),
-  (5, 1, 'second observation, ''quoted'' and "double"', 'active', NULL, 'medium', 'believed', 'conversation', NULL, 'default', NULL, NULL, 0, 1.0, NULL, 0, '2026-04-01 00:00:00+00', '2026-01-02 04:00:01+00', '2026-04-02 00:00:00+00', 'settled', 3, 0, NULL, NULL, NULL, NULL, NULL),
-  (9, 2, 'third, about the garden', 'active', 'calm', 'light', 'believed', 'conversation', NULL, 'default', NULL, NULL, 0, 0.5, NULL, 0, NULL, '2026-01-05 08:30:00-05', NULL, NULL, NULL, 1, '2026-01-06 00:00:00+00', NULL, '2026-12-31 00:00:00+00', 5, 3);
-INSERT INTO observation_versions (id, observation_id, content, weight, emotion, changed_at) VALUES
-  (1, 3, 'earlier wording', 'medium', 'warm', '2026-01-02 05:00:00.5+00'),
-  (2, 3, 'earlier still', NULL, NULL, '2026-01-02 04:30:00+00');
-INSERT INTO relations (id, from_entity, to_entity, relation_type, from_context, to_context, store_in, created_at) VALUES
-  (1, 'Rich Person One', 'Rich Person Two', 'knows', 'default', 'default', 'default', '2026-01-02 06:00:00+00'),
-  (2, 'Rich Person One', 'Garden ☃ naïve', 'tends', 'default', 'default', 'default', '2026-01-02 06:00:01+00');
-INSERT INTO threads (id, thread_type, content, context, priority, status, source, created_at, updated_at, resolved_at, resolution) VALUES
-  ('thr-1', 'intention', 'a thread', 'default', 'high', 'active', 'self', '2026-01-02 07:00:00+00', '2026-01-02 07:00:01+00', NULL, NULL),
-  ('thr-2', 'question', 'a resolved thread', NULL, 'low', 'resolved', 'self', '2026-01-02 07:00:00+00', '2026-01-02 07:30:00+00', '2026-01-02 07:30:00+00', 'answered');
-INSERT INTO context_entries (id, scope, content, links, updated_at) VALUES
-  ('ctx-1', 'work', 'what is happening', '["thr-1"]', '2026-01-02 08:00:00+00');
-INSERT INTO relational_state (id, person, feeling, intensity, timestamp) VALUES
-  (1, 'Rich Person One', 'fond', 'strong', '2026-01-02 09:00:00+00');
-INSERT INTO identity (id, section, content, weight, connections, timestamp) VALUES
-  (1, 'core.values', 'curiosity', 0.7, '[]', '2026-01-02 10:00:00+00'),
-  (2, 'core.self', 'careful', 0.9, '["core.values"]', '2026-01-02 10:00:01+00');
-INSERT INTO journals (id, entry_date, content, tags, emotion, journal_type, created_at) VALUES
-  (1, '2026-01-02', 'a journal entry', '["a","b"]', 'content', 'entry', '2026-01-02 11:00:00+00'),
-  (2, NULL, 'an undated one', '[]', NULL, 'entry', '2026-01-02 11:00:01+00');
-INSERT INTO consolidation_groups (id, summary, entity_id, source_observation_ids, consolidated_observation_id, created_at) VALUES
-  (1, 'merged two', 1, '[3,5]', 3, '2026-01-02 12:00:00+00');
-INSERT INTO images (id, path, description, context, emotion, weight, entity_id, observation_id, created_at, novelty_score, last_surfaced_at, surface_count, archived_at, access_count, last_accessed_at) VALUES
-  (1, 'images/one.png', 'a picture', 'default', 'warm', 'medium', 1, 3, '2026-01-02 13:00:00+00', 1.0, NULL, 0, NULL, 0, NULL);
-INSERT INTO subconscious (id, state_type, data, updated_at) VALUES
-  (1, 'mood', '{"valence":0.5}', '2026-01-02 14:00:00+00');
-INSERT INTO daemon_proposals (id, proposal_type, from_obs_id, to_obs_id, from_entity_id, to_entity_id, reason, confidence, status, proposed_at, resolved_at) VALUES
-  (1, 'resonance', 3, 5, 1, 1, 'they keep appearing together', 0.75, 'pending', '2026-01-02 15:00:00+00', NULL);
-INSERT INTO tensions (id, pole_a, pole_b, context, sit_count, sit_notes, status, created_at, resolved_at, resolution) VALUES
-  ('ten-1', 'speed', 'care', 'default', 2, '["first","second"]', 'active', '2026-01-02 16:00:00+00', NULL, NULL);
-INSERT INTO dormant_observations (id, observation_id, first_marked, rescue_attempts, last_rescue_attempt) VALUES
-  (1, 5, '2026-01-02 17:00:00+00', 1, '2026-01-03 17:00:00+00');
-INSERT INTO co_surfacing (id, obs_a_id, obs_b_id, co_count, last_co_surfaced, relation_proposed, relation_created) VALUES
-  (1, 3, 5, 6, '2026-01-02 18:00:00+00', 1, 0);
-INSERT INTO embeddings (id, source_type, source_id, embedding, content, metadata) VALUES
-  ('observation-3', 'observation', 3, (SELECT array_fill(0.125::real, ARRAY[768])::vector), 'embedded text', '{"k":[1,2],"n":null}'),
-  ('observation-5', 'observation', 5, NULL, NULL, '{}');
-`;
-
 function databaseUrl(base, database) {
   const url = new URL(base);
   url.pathname = `/${database}`;

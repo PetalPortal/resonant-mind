@@ -1,34 +1,18 @@
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { main } from '../../scripts/v32-to-v4/cli.mjs';
 import { assertNodeVersion } from '../../scripts/v32-to-v4/lib/runtime.mjs';
 import { MigrationRefusal } from '../../scripts/v32-to-v4/lib/refusal.mjs';
+import { COMMANDS, COMMAND_GROUPS, fullHelp, usageFor } from '../../scripts/v32-to-v4/commands/usage.mjs';
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const cliPath = resolve(repositoryRoot, 'scripts/v32-to-v4/cli.mjs');
 
-const expectedHelp = `Usage: npm run migrate:v32 -- <command>
-
-Commands:
-  inspect-source
-  export         --source-kind ... --source ... --migration-id ... --bundle ... [--passphrase-file ...]
-                 [--allow-plaintext-bundle --acknowledge-plaintext-risk]
-  verify-bundle  --bundle ... [--passphrase-file ...]
-  compile-policy
-  inspect-target
-  prepare-target
-  dry-run
-  import
-  plan-images
-  copy-images
-  plan-reembed
-  validate
-  status
-
-Interrupted pre-commit runs are not auto-resumed; restart against a fresh target.
-`;
+// The help is generated from commands/usage.mjs; this test pins what an operator must be able to read in it.
+const expectedHelp = fullHelp();
 
 function spawnCli(args) {
   return spawnSync(process.execPath, [cliPath, ...args], {
@@ -63,6 +47,41 @@ describe('v3.2 to v4 migration CLI', () => {
     expect(result.stdout).toBe(expectedHelp);
     expect(result.stdout).not.toContain('\n  plan\n');
     expect(result.stdout).not.toContain('cutover-status');
+  });
+
+  it('lists every command with its options, and per-command help', () => {
+    const commands = ['inspect-source', 'export', 'verify-bundle', 'draft-decisions', 'apply-decisions', 'compile-policy', 'plan-relational', 'inspect-target', 'prepare-target', 'dry-run', 'import', 'plan-images', 'copy-images', 'plan-reembed', 'validate', 'status'];
+    expect(COMMANDS).toEqual(commands);
+    const help = spawnCli(['--help']).stdout;
+    for (const command of commands) expect(help, command).toMatch(new RegExp(`^  ${command} +[-\[(]`, 'mu'));
+    for (const option of ['--source-kind', '--passphrase-file', '--reviewed-by', '--compiled-policy', '--staging-schema', '--receipt-out', '--dry-run', '--bundle-manifest-sha256', '--compiled-policy-sha256', '--dry-run-receipt', '--import-receipt', '--reembed-receipts', '--image-receipt', '--operator-cutover-ack']) expect(help, option).toContain(option);
+    expect(help).toContain('env:NAME');
+    const single = spawnCli(['validate', '--help']);
+    expect(single.status).toBe(0);
+    expect(single.stdout).toBe(usageFor('validate'));
+    expect(single.stdout).toContain('--import-receipt <file>');
+    expect(single.stdout).not.toContain('inspect-source');
+  });
+
+  it('documents exactly the options each command parser accepts', () => {
+    // Every option a parser knows must be in the help for its command, and the help may not invent one.
+    const sources = {
+      'inspect-source': ['inspect-source'], export: ['export'], 'verify-bundle': ['verify-bundle'], 'draft-decisions': ['draft-decisions'], 'apply-decisions': ['apply-decisions'],
+      'compile-policy': ['compile-policy'], 'plan-relational': ['plan-relational'], 'plan-images': ['plan-images'], 'copy-images': ['copy-images'], 'plan-reembed': ['plan-reembed'], validate: ['validate'], status: ['status'],
+      'inspect-target': ['target'], 'prepare-target': ['target'], 'dry-run': ['target'], import: ['target'],
+    };
+    const optionsIn = (text) => new Set(text.match(/--[a-z][a-z0-9-]*/gu) ?? []);
+    const documented = Object.fromEntries(COMMAND_GROUPS.flatMap(([, commands]) => commands.map(([name, options]) => [name, optionsIn(options.join(' '))])));
+    const byFile = {};
+    for (const [command, [file]] of Object.entries(sources)) {
+      byFile[file] ??= { parser: optionsIn(readFileSync(resolve(repositoryRoot, 'scripts/v32-to-v4/commands', `${file}.mjs`), 'utf8')), documented: new Set() };
+      for (const option of documented[command]) byFile[file].documented.add(option);
+    }
+    for (const [file, { parser, documented: listed }] of Object.entries(byFile)) {
+      for (const option of listed) expect(parser.has(option), `${file}: ${option} is in --help but not in the parser`).toBe(true);
+      // --json and --help are global; --resume-schema is named by the target parser only to refuse it (there is no resume)
+      for (const option of parser) if (!['--json', '--help', '--resume-schema'].includes(option)) expect(listed.has(option), `${file}: ${option} is accepted by the parser but missing from --help`).toBe(true);
+    }
   });
 
   it('prints help when no command is supplied', () => {

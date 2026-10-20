@@ -17,6 +17,10 @@ import { parseCopyImagesArgs, copyImagesCommand, humanCopyImagesResult } from '.
 import { parsePlanReembedArgs, planReembedCommand, humanPlanReembedResult } from './commands/plan-reembed.mjs';
 import { parseValidateArgs, validateCommand, humanValidateResult } from './commands/validate.mjs';
 import { parseStatusArgs, statusCommand, humanStatusResult } from './commands/status.mjs';
+import { draftDecisionsCommand, humanDraftDecisionsResult, parseDraftDecisionsArgs } from './commands/draft-decisions.mjs';
+import { applyDecisionsCommand, humanApplyDecisionsResult, parseApplyDecisionsArgs } from './commands/apply-decisions.mjs';
+import { humanPlanRelationalResult, parsePlanRelationalArgs, planRelationalCommand } from './commands/plan-relational.mjs';
+import { COMMANDS, fullHelp, usageFor } from './commands/usage.mjs';
 import {
   exitCodeFor,
   isMigrationRefusal,
@@ -24,42 +28,8 @@ import {
   serializeRefusal,
 } from './lib/refusal.mjs';
 
-const commands = [
-  'inspect-source',
-  'export',
-  'verify-bundle',
-  'compile-policy',
-  'inspect-target',
-  'prepare-target',
-  'dry-run',
-  'import',
-  'plan-images',
-  'copy-images',
-  'plan-reembed',
-  'validate',
-  'status',
-];
-
-const help = `Usage: npm run migrate:v32 -- <command>
-
-Commands:
-  inspect-source
-  export         --source-kind ... --source ... --migration-id ... --bundle ... [--passphrase-file ...]
-                 [--allow-plaintext-bundle --acknowledge-plaintext-risk]
-  verify-bundle  --bundle ... [--passphrase-file ...]
-  compile-policy
-  inspect-target
-  prepare-target
-  dry-run
-  import
-  plan-images
-  copy-images
-  plan-reembed
-  validate
-  status
-
-Interrupted pre-commit runs are not auto-resumed; restart against a fresh target.
-`;
+const commands = COMMANDS;
+const help = fullHelp();
 
 function stripCheckpointOptions(argv) {
   const checkpointOption = argv.find((value) => ['--checkpoint-dir', '--checkpoint-migration-id', '--checkpoint-artifact-sha256'].includes(value));
@@ -69,7 +39,35 @@ function stripCheckpointOptions(argv) {
 function recordCheckpoint(result) { return result; }
 function applyCheckpointInputs(_command, args) { return args; }
 
-export function main({
+function reportFailure(error, { json, writeStdout, writeStderr }) {
+  if (isMigrationRefusal(error)) {
+    const serialized = serializeRefusal(error, { json });
+    (json ? writeStdout : writeStderr)(serialized);
+    return exitCodeFor(error);
+  }
+  const summary = 'Unexpected internal migration error.';
+  if (json) {
+    writeStdout(canonicalJson({ code: 'RMIG-E-INTERNAL', summary }));
+  } else {
+    writeStderr(`RMIG-E-INTERNAL: ${summary}\n`);
+  }
+  return exitCodeFor(error);
+}
+
+// A refusal or failure from a command that runs asynchronously is reported the same way as one thrown
+// synchronously: structured, on stdout as JSON when --json is set, otherwise on stderr.
+export function main(options = {}) {
+  const {
+    argv = process.argv.slice(2),
+    writeStdout = (value) => process.stdout.write(value),
+    writeStderr = (value) => process.stderr.write(value),
+  } = options;
+  const outcome = runMain(options);
+  if (!(outcome instanceof Promise)) return outcome;
+  return outcome.catch((error) => reportFailure(error, { json: argv.includes('--json'), writeStdout, writeStderr }));
+}
+
+function runMain({
   argv = process.argv.slice(2),
   nodeMajor,
   writeStdout = (value) => process.stdout.write(value),
@@ -97,6 +95,10 @@ export function main({
       });
     }
 
+    if (rawCommandArgs.includes('--help')) {
+      writeStdout(usageFor(command));
+      return 0;
+    }
     const { clean: commandArgs } = stripCheckpointOptions(rawCommandArgs);
     maybeInjectCheckpointFault('__command-start__');
     if (runCommand !== undefined) return runCommand(command, commandArgs);
@@ -116,6 +118,21 @@ export function main({
         else writeStdout(humanVerifyResult(result));
         return 0;
       });
+    }
+    if (command === 'draft-decisions') {
+      const result = draftDecisionsCommand(parseDraftDecisionsArgs(commandArgs));
+      writeStdout(json ? `${canonicalJson(result)}\n` : humanDraftDecisionsResult(result));
+      return 0;
+    }
+    if (command === 'apply-decisions') {
+      const result = applyDecisionsCommand(parseApplyDecisionsArgs(commandArgs));
+      writeStdout(json ? `${canonicalJson(result)}\n` : humanApplyDecisionsResult(result));
+      return 0;
+    }
+    if (command === 'plan-relational') {
+      const result = planRelationalCommand(parsePlanRelationalArgs(commandArgs));
+      writeStdout(json ? `${canonicalJson(result)}\n` : humanPlanRelationalResult(result));
+      return 0;
     }
     if (command === 'compile-policy') {
       const parsed = parseCompilePolicyArgs(commandArgs);
@@ -154,18 +171,7 @@ export function main({
       return 0;
     });
   } catch (error) {
-    if (isMigrationRefusal(error)) {
-      const serialized = serializeRefusal(error, { json });
-      (json ? writeStdout : writeStderr)(serialized);
-      return exitCodeFor(error);
-    }
-    const summary = 'Unexpected internal migration error.';
-    if (json) {
-      writeStdout(canonicalJson({ code: 'RMIG-E-INTERNAL', summary }));
-    } else {
-      writeStderr(`RMIG-E-INTERNAL: ${summary}\n`);
-    }
-    return exitCodeFor(error);
+    return reportFailure(error, { json, writeStdout, writeStderr });
   }
 }
 
