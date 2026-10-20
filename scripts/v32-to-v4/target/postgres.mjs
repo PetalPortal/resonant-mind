@@ -212,7 +212,7 @@ export async function prepareTarget({ client, migrationRunner, sourceIdentity, m
   if (!migrationRunner || typeof migrationRunner.run !== 'function') throw new TypeError('prepareTarget requires the immutable v4 migration runner.');
   const migrations = await readV4Migrations();
   const ledger = { migration_set_sha256: migrationSetSha256(migrations), migrator_version: V4_MIGRATOR_VERSION };
-  const boundPlan = plan ? bindRelationalPlan(plan, ledger) : null;
+  const boundPlan = plan ? bindRelationalPlan(plan, { migrationSetSha256: ledger.migration_set_sha256, migratorVersion: ledger.migrator_version }) : null;
   const planHash = boundPlan?.plan_sha256 ?? canonicalSha256({ migrationId });
   const contentHash = boundPlan ? stageContentSha256(boundPlan.members) : canonicalSha256({});
   let created = false; let runnerCompleted = false;

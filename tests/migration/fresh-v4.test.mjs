@@ -3,6 +3,7 @@ import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
 import {
   createV4MigrationRunner,
   migrationChecksum,
+  migrationSetSha256,
   readV4Migrations,
 } from '../../scripts/migrate-postgres.mjs';
 import {
@@ -107,6 +108,23 @@ it('binds staging preparation to migration hashes and cleans the schema on failu
   const runner = { run: vi.fn(async () => { throw new Error('migration failed'); }) };
   await expect(prepareTarget({ client, migrationRunner: runner, sourceIdentity: IDENTITY, migrationId: PLAN.migration_id, bundleManifestSha256: PLAN.bundle_manifest_sha256, compiledPolicySha256: PLAN.compiled_policy_sha256 })).rejects.toThrow('migration failed');
   expect(client.calls.some(({ text }) => /DROP SCHEMA/.test(text))).toBe(true);
+});
+
+it('binds a supplied relational plan to the immutable migration set and migrator version before staging', async () => {
+  const client = fakeClient([
+    { when: /SHOW transaction_read_only/, result: { rows: [{ transaction_read_only: 'on' }] } },
+    { when: /current_database/, result: { rows: [{ database_name: 'target', database_oid: '12', server_address: '127.0.0.1', server_port: '5432', server_version: '160000' }] } },
+    { when: /non_system_objects/, result: { rows: [{ object_count: '0', schemas: ['public'], extensions: ['plpgsql'], vector_schemas: [], objects: [], inventory_complete: true }] } },
+    { when: /pg_available_extensions/, result: { rows: [{ available: true }] } },
+  ]);
+  const runner = { run: vi.fn(async () => { throw new Error('migration failed'); }) };
+  await expect(prepareTarget({ client, migrationRunner: runner, sourceIdentity: IDENTITY, migrationId: PLAN.migration_id, bundleManifestSha256: PLAN.bundle_manifest_sha256, compiledPolicySha256: PLAN.compiled_policy_sha256, plan: PLAN })).rejects.toThrow('migration failed');
+  const metadata = client.calls.find(({ text }) => /INSERT INTO .*run_metadata/.test(text));
+  const migrations = await readV4Migrations();
+  expect(metadata.values[4]).toBe(migrationSetSha256(migrations));
+  expect(metadata.values[5]).toEqual(expect.any(String));
+  expect(metadata.values[6]).toMatch(/^[0-9a-f]{64}$/);
+  expect(metadata.values[6]).not.toBe(canonicalSha256({ migrationId: PLAN.migration_id }));
 });
 
 it('produces a receipt-bearing dry run with exact row hashes and validation buckets', () => {
