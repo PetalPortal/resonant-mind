@@ -1,11 +1,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { COMMANDS, COMMAND_GROUPS } from '../../scripts/v32-to-v4/commands/usage.mjs';
 
 const root = resolve(import.meta.dirname, '../..');
 const read = (relative) => readFileSync(resolve(root, relative), 'utf8');
-const userGuide = () => read('USER_MIGRATION_GUIDE.md');
-const agentRunbook = () => read('AGENT_MIGRATION_RUNBOOK.md');
+const normalized = (text) => text.split(String.fromCharCode(13, 10)).join(String.fromCharCode(10));
+const userGuide = () => normalized(read('USER_MIGRATION_GUIDE.md'));
+const agentRunbook = () => normalized(read('AGENT_MIGRATION_RUNBOOK.md'));
 const refusalCodes = [
   'RMIG-E-NODE-VERSION',
   'RMIG-E-SOURCE-ARG',
@@ -51,8 +53,8 @@ const requiredHeadings = [
 ];
 
 const exactCommands = [
-  'inspect-source', 'export', 'verify-bundle', 'compile-policy', 'inspect-target',
-  'prepare-target', 'dry-run', 'import', 'plan-images', 'copy-images',
+  'inspect-source', 'export', 'verify-bundle', 'draft-decisions', 'apply-decisions', 'compile-policy', 'plan-relational',
+  'inspect-target', 'prepare-target', 'dry-run', 'import', 'plan-images', 'copy-images',
   'plan-reembed', 'validate', 'status',
 ];
 
@@ -118,14 +120,52 @@ describe('operator migration documentation', () => {
       '--source-kind', '--source', '--report', '--migration-id', '--bundle',
       '--source-report', '--source-fingerprint', '--passphrase-file',
       '--allow-plaintext-bundle', '--acknowledge-plaintext-risk', '--decisions', '--out',
+      '--reviewed-by', '--compiled-policy',
       '--target', '--bundle-manifest-sha256', '--compiled-policy-sha256',
       '--resume-schema', '--plan', '--staging-schema', '--receipt-out', '--dry-run',
       '--input', '--images', '--adapter', '--external-receipt', '--trusted-public-key',
       '--reembed-plan', '--reembed-receipts', '--dry-run-receipt', '--import-receipt',
-      '--target-catalog', '--current-migrations', '--migration-set-sha256',
       '--image-plan', '--image-receipt', '--operator-cutover-ack',
     ]);
-    expect(text).toContain('The current top-level --help lists command names only');
+    expect(text).toContain('node scripts/v32-to-v4/cli.mjs <command> --help');
+    expect(text).not.toContain('Implementation conflict');
+    expect(text).not.toContain('command names only');
+  });
+
+  it('names a real command and real options in every step: the guide\'s examples are checked against the CLI\'s own option lists', () => {
+    const documented = Object.fromEntries(COMMAND_GROUPS.flatMap(([, commands]) => commands.map(([name, options]) => [name, new Set(options.join(' ').match(/--[a-z][a-z0-9-]*/gu))])));
+    const used = {};
+    for (const block of userGuide().matchAll(/```bash\n([\s\S]*?)\n```/gu)) {
+      for (const invocation of block[1].split(/\n\s*\n/u)) {
+        const match = /node scripts\/v32-to-v4\/cli\.mjs (\S+)/u.exec(invocation);
+        if (!match) continue;
+        expect(COMMANDS, `${match[1]} is not a CLI command`).toContain(match[1]);
+        (used[match[1]] ??= new Set());
+        for (const option of invocation.match(/--[a-z][a-z0-9-]*/gu) ?? []) used[match[1]].add(option);
+      }
+    }
+    // every command appears in the guide's sequence, and every option it shows is one the command accepts
+    for (const command of COMMANDS) expect(used[command], `the guide shows no example of ${command}`).toBeDefined();
+    for (const [command, options] of Object.entries(used)) for (const option of options) expect(documented[command].has(option), `guide shows ${command} ${option}`).toBe(true);
+    // and the steps that used to be missing are there, in order
+    const guide = userGuide();
+    const order = ['draft-decisions', 'apply-decisions', 'compile-policy', 'plan-relational', 'prepare-target', 'dry-run', 'import', 'validate'].map((command) => guide.indexOf(`cli.mjs ${command}`));
+    expect(order.every((position) => position > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+  });
+
+  it('says how to connect through a pooler, what v4 fills in for NULLs, and that earlier decision drafts are stale', () => {
+    const guide = userGuide();
+    expect(guide).toMatch(/direct \(non-pooled\) connection/u);
+    expect(guide).toMatch(/Neon/u);
+    expect(guide).toMatch(/set_config/u);
+    expect(guide).toMatch(/RMIG-E-SOURCE-DRIFT[^.]*pooler|pooler[^.]*RMIG-E-SOURCE-DRIFT/u);
+    expect(guide).toContain('null-replaced-by-v4-default');
+    expect(guide).toMatch(/import time/u);
+    expect(guide).toMatch(/earlier build[^.]*no longer match/u);
+    const runbook = agentRunbook();
+    for (const command of ['draft-decisions', 'apply-decisions --reviewed-by', 'plan-relational', 'inspect-target', 'prepare-target']) expect(runbook, command).toContain(command);
+    expect(runbook).toMatch(/never its own name/u);
   });
 
   it('links the new guides from the existing entry points', () => {

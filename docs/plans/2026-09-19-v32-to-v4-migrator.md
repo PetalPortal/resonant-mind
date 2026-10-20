@@ -1,5 +1,7 @@
 # Safe v3.2 to v4 Migrator Implementation Plan
 
+> **Historical.** This is the original design plan. The option vocabulary below (`--policy-draft`, `--receipts <dir>`, `--apply`, bundle-based target options) was not what was built. The commands and options the CLI actually has are in `node scripts/v32-to-v4/cli.mjs --help` and in [USER_MIGRATION_GUIDE.md](../../USER_MIGRATION_GUIDE.md), which are authoritative.
+
 > **For Hermes:** Use subagent-driven-development skill to implement this plan task-by-task. Load the test-driven-development skill before writing production code and request a code review at every stage boundary.
 
 **Goal:** Ship a fail-closed, resumable, offline export/import product that reads only the two exact public Resonant Mind v3.2 schemas and imports reviewed data into a brand-new v4 PostgreSQL/pgvector database, while making every unsupported or external phase explicit.

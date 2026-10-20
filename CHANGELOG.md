@@ -4,6 +4,21 @@ All notable changes to Resonant Mind. Previously released as "Mind Cloud" (v1.0â
 
 ---
 
+## [Unreleased]
+
+### v3.2 â†’ v4 migrator (operator-assisted, pre-release)
+
+- The CLI now completes the whole operator flow on its own: `draft-decisions`, `apply-decisions`, `plan-relational` are new, `import` writes its receipt (`--receipt-out`), the target commands accept a SQLite or D1-export source (`--source-kind`), and `--help` lists every command with its options (`<command> --help` for one).
+- `validate` reads the live source and the live target itself instead of snapshot files. It compares every mapped column of every source row with the target (timestamps as exact microsecond instants), accounts for each difference by a recorded policy entry, re-proves the target's constraints, foreign keys, CHECK expressions, indexes and sequences, checks the receipts against the plan and the target's own record, and exits with `RMIG-E-VALIDATION` on any finding.
+- The PostgreSQL source sets `TimeZone`, `DateStyle`, `search_path` and `extra_float_digits` with `set_config` inside the read-only snapshot transaction instead of as startup options, so a transaction-mode pooler cannot reject them. Use a direct connection where the provider offers one.
+- Another session's temporary tables no longer make an empty target look used.
+- `observations.archived_at` and `observations.last_accessed_at` are now normalized like every other timestamp; a naive space-separated timestamp keeps its microseconds under a reviewed timezone; observation versions are numbered by instant and integer id, not by text.
+- A source NULL in `entities.created_at`, `updated_at`, `salience` or `primary_context` is recorded as a `null-replaced-by-v4-default` entry in the loss report (v4's routing trigger fills in the import time, `'active'`, `'default'`).
+
+**Compatibility:** a PostgreSQL `timestamptz` is now exported as RFC 3339 text in UTC (it used to be a JavaScript Date, which rounds to milliseconds), so the hash of every source row that has one has changed. A decision draft or reviewed decision manifest made by an earlier build is bound to the old row hashes and will be refused as stale (`RMIG-E-POLICY-MISMATCH`); export a new bundle and draft the decisions again. The migrator has not shipped in any release, so only drafts made during development are affected.
+
+---
+
 ## [4.0.1] - 2026-09-19
 
 ### Fixed

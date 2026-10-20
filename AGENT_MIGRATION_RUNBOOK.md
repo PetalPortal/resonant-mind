@@ -131,7 +131,7 @@ STOP: RMIG-E-BUNDLE-INTEGRITY or RMIG-E-BUNDLE-DECRYPT: the bundle is not unchan
 
 ### `SOURCE_IDENTITY_ACCEPTED -> DECISIONS_ACCEPTED`
 
-The agent may generate a policy template and identify candidates. Only the authorized decision owner may approve semantics. The agent must show a redacted, hash-bound review list covering:
+The agent runs `draft-decisions` on the verified bundle. The draft lists every ambiguity as an item with its allowed choices and no choice selected; the agent identifies candidates from it. Only the authorized decision owner may approve semantics: the owner (not the agent) supplies the `choice` of every item, and the agent writes exactly those choices into the draft. The agent then runs `apply-decisions --reviewed-by "<the decision owner's name>"`, never its own name and never a name the owner did not give, followed by `compile-policy` and `plan-relational`. `apply-decisions` selects nothing: it refuses an item without a choice, a wildcard, a choice the item does not allow, a missing required field, a stale or extra item, and a draft made for another bundle. The agent must show a redacted, hash-bound review list covering:
 
 - duplicate entity names: merge survivor plus field rules, or final names for deterministic rename;
 - final entity kind and `people`/`nodes` routing;
@@ -145,7 +145,7 @@ The agent may generate a policy template and identify candidates. Only the autho
 - each declared loss and its audit reason;
 - re-embedding defer/required choice, with its resulting readiness state.
 
-The agent must compile the policy only after every item is resolved and the decisions hash matches the unchanged bundle. It must not fill missing decisions with defaults, choose a merge survivor for convenience, translate malformed JSON to an empty container, or approve a loss because row counts look plausible.
+The agent must apply and compile the policy only after every item is resolved and the decisions hash matches the unchanged bundle. It must not fill missing decisions with defaults, choose a merge survivor for convenience, translate malformed JSON to an empty container, or approve a loss because row counts look plausible.
 
 ```text
 STOP: RMIG-E-POLICY-UNRESOLVED: a semantic decision is unresolved. Return the item to the decision owner; do not infer or coerce it.
@@ -159,7 +159,7 @@ STOP: RMIG-E-POLICY-MISMATCH: the reviewed policy is not bound to this unchanged
 
 ### `DECISIONS_ACCEPTED -> BUNDLE_VERIFIED -> FRESH_TARGET_ACCEPTED`
 
-The agent must inspect the target with `--target env:RMIG_TARGET --source env:RMIG_SOURCE` and capture the redacted identity. Accept it only when:
+The agent must run `inspect-target --target env:RMIG_TARGET --source env:RMIG_SOURCE` (for a SQLite or D1-export source: `--source-kind` and the local path) and capture the redacted identity. A concurrent session's temporary tables are not target objects; every other user object, schema or extension but `vector` is. Accept it only when:
 
 - the target identity is distinct from the source identity;
 - target is PostgreSQL with pgvector;
@@ -184,7 +184,7 @@ STOP: RMIG-E-TARGET-SCHEMA: the target does not have the exact released v4 schem
 
 ### `FRESH_TARGET_ACCEPTED -> DRY_RUN_ACCEPTED`
 
-Prepare the target, then execute the current `dry-run` command. Require a successful receipt bound to all of:
+Run `prepare-target` (with the relational plan from `plan-relational`), then `dry-run` with `--receipt-out`. Require a successful receipt bound to all of:
 
 - `migration_id`;
 - source identity and source report hash;
@@ -205,7 +205,7 @@ STOP: RMIG-E-DRY-RUN-REQUIRED or RMIG-E-DRY-RUN: no matching accepted dry-run re
 
 ### `DRY_RUN_ACCEPTED -> IMPORT_ACCEPTED`
 
-The agent may invoke `import` only after a human or policy-controlled operator has acknowledged the dry-run receipt. Before invocation, re-read the source/target identities and all artifact hashes. The importer must write only to the fresh prepared target and must not mutate the source.
+The agent may invoke `import` (with `--receipt-out` for the import receipt) only after a human or policy-controlled operator has acknowledged the dry-run receipt. Before invocation, re-read the source/target identities and all artifact hashes. The importer must write only to the fresh prepared target and must not mutate the source.
 
 If the target changed, the receipt mismatches, or entity compatibility routing is inconsistent:
 
@@ -237,18 +237,18 @@ STOP: RMIG-E-REEMBED-INCOMPLETE: provider receipts are incomplete. Finish the ex
 
 ### `EXTERNAL_EVIDENCE_ACCEPTED -> VALIDATION_ACCEPTED`
 
-Run the exact `validate` and `status` commands in the user guide. Validate:
+Run the exact `validate` and `status` commands in the user guide. `validate` reads the live source and the live target itself (read-only) and writes a report; the agent supplies the verified bundle, the reviewed decisions, the plan, the receipts and any external evidence, not snapshots. It validates:
 
-- source/export/staged/target report agreement;
-- policy and declared loss accounting;
-- target catalog and migration-set checksum;
-- imported row counts and FK/invariant results;
-- image plan/receipt completeness and signature trust;
-- re-embedding plan/receipts or an explicit deferred state;
-- dry-run and import receipts;
+- the decisions compile to the policy the plan was built from, and the plan is what that policy produces from the bundle;
+- the live source still equals the bundle, row for row;
+- every mapped column of every source row against the live target (exact text, timestamps to the microsecond), each difference accounted for by a recorded policy entry, and the plan against the target;
+- the target's constraints, indexes, foreign keys, CHECK expressions, sequences, routing, version order and migration-set record;
+- declared losses, including the `null-replaced-by-v4-default` entries for NULLs that v4 fills in;
+- image plan/receipt completeness and signature trust, and the re-embedding plan/receipts (supplied evidence is validated; evidence not supplied leaves the state at `data-imported-images-pending` or `data-imported-not-search-ready`, never ready);
+- dry-run and import receipts, the import receipt against the target's own record;
 - report hash and `migration_id`.
 
-`status` is a report reader and readiness calculator. It never changes target state. A report with violations is not “mostly ready.”
+Any finding makes `validate` exit with `RMIG-E-VALIDATION` (exit code 2) after writing the report with status `refused`; the report path is in the refusal. `status` is a report reader and readiness calculator. It never changes target state. A report with violations is not “mostly ready.” The agent never reruns `validate` to a path it has already used, edits a report to clear a finding, or points `validate` at a different source, target or plan to make a check pass.
 
 ```text
 STOP: RMIG-E-VALIDATION: validation found a violation. Resolve every finding and rerun validation; do not edit the report or suppress the violation.
