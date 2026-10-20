@@ -34,6 +34,12 @@ function normalizeColumn(value) {
 
 function normalizeConstraint(value, kind) {
   if (kind === 'foreign_keys') {
+    // A missing action is never read as NO ACTION: a catalog that does not say what a foreign key does
+    // on delete or update cannot be compared with one that does, and defaulting would let a SET NULL
+    // or CASCADE key match a plain one.
+    if (typeof value.on_delete !== 'string' || value.on_delete.trim() === '' || typeof value.on_update !== 'string' || value.on_update.trim() === '') {
+      throw new TypeError(`Foreign key ${String(value.name)} must state both on_delete and on_update.`);
+    }
     return {
       name: String(value.name),
       columns: [...(value.columns ?? [])].map(String),
@@ -41,8 +47,8 @@ function normalizeConstraint(value, kind) {
         table: String(value.references?.table),
         columns: [...(value.references?.columns ?? [])].map(String),
       },
-      on_delete: String(value.on_delete ?? 'NO ACTION').toUpperCase(),
-      on_update: String(value.on_update ?? 'NO ACTION').toUpperCase(),
+      on_delete: value.on_delete.trim().toUpperCase(),
+      on_update: value.on_update.trim().toUpperCase(),
     };
   }
   if (kind === 'checks') {

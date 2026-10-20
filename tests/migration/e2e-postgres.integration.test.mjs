@@ -65,15 +65,17 @@ describe.skipIf(!runE2E)('real PostgreSQL/pgvector v3.2 to fresh-v4 E2E', () => 
     const suffix = `${process.pid}_${Date.now()}`;
     const sourceDb = `rmig_src_${suffix}`;
     const targetDb = `rmig_tgt_${suffix}`;
-    const root = mkdtempSync(join(repo, '.tmp-postgres-e2e-'));
-    const passphrase = join(root, 'passphrase');
-    const bundlePath = join(root, 'bundle.rmigrate');
-    writeFileSync(passphrase, 'postgres-e2e-passphrase', { mode: 0o600 });
-    const admin = await connect(adminUrl);
+    let root;
+    let admin;
     let sourceClient;
     let targetClient;
     let runner;
     try {
+      root = mkdtempSync(join(repo, '.tmp-postgres-e2e-'));
+      const passphrase = join(root, 'passphrase');
+      const bundlePath = join(root, 'bundle.rmigrate');
+      writeFileSync(passphrase, 'postgres-e2e-passphrase', { mode: 0o600 });
+      admin = await connect(adminUrl);
       await admin.query(`CREATE DATABASE ${quoteIdentifier(sourceDb)}`);
       await admin.query(`CREATE DATABASE ${quoteIdentifier(targetDb)}`);
       const sourceUrl = databaseUrl(adminUrl, sourceDb);
@@ -122,10 +124,10 @@ describe.skipIf(!runE2E)('real PostgreSQL/pgvector v3.2 to fresh-v4 E2E', () => 
       await runner?.close().catch(() => {});
       await sourceClient?.end().catch(() => {});
       await targetClient?.end().catch(() => {});
-      await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(sourceDb)}`).catch(() => {});
-      await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(targetDb)}`).catch(() => {});
-      await admin.end();
-      rmSync(root, { recursive: true, force: true });
+      await admin?.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(sourceDb)} WITH (FORCE)`).catch(() => {});
+      await admin?.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(targetDb)} WITH (FORCE)`).catch(() => {});
+      await admin?.end().catch(() => {});
+      if (root !== undefined) rmSync(root, { recursive: true, force: true });
     }
   }, 180_000);
 });

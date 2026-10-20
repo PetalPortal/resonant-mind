@@ -10,6 +10,14 @@ import { sourceSpecFor } from '../lib/fingerprint.mjs';
 import { readFileSync } from 'node:fs';
 
 const MAP = JSON.parse(readFileSync(new URL('../spec/v3.2-to-v4-map.json', import.meta.url), 'utf8'));
+// migrations/postgres/0005d_routing_triggers.sql: COALESCE(NEW.salience, 'active'), COALESCE(NEW.primary_context, 'default'),
+// COALESCE(NEW.created_at, NOW()), COALESCE(NEW.updated_at, NOW()).
+export const V4_ENTITY_NULL_SUBSTITUTES = Object.freeze([
+  ['created_at', 'the import time (NOW() inside the import transaction)'],
+  ['updated_at', 'the import time (NOW() inside the import transaction)'],
+  ['salience', "'active'"],
+  ['primary_context', "'default'"],
+]);
 function refuse(summary, details = {}, code = 'RMIG-E-POLICY-UNRESOLVED') { throw new MigrationRefusal({ code, phase: 'compile-policy', summary, safe_details: details, report_path: null }); }
 function rowsOf(bundle) { return extractBundleRows(bundle); }
 function choiceAction(choice) { return typeof choice === 'string' ? choice : choice?.action ?? choice?.type ?? choice?.kind ?? choice?.choice; }
@@ -108,6 +116,9 @@ export function compilePolicy({ bundle, decisions, migrationId, bundleManifestSh
       if (idEntry?.excluded || idEntry?.merged) { coverage[mapping.source_table].excluded_rows += 1; losses.push({ kind: idEntry.excluded ? 'excluded-row' : 'merged-source-row', source_table: mapping.source_table, source_row_sha256: rowHash, target_id: idEntry.target_id, rationale: idEntry.excluded ? 'reviewed exclusion' : 'source row represented by reviewed merge survivor' }); continue; }
       coverage[mapping.source_table].mapped_rows += 1;
       for (const dropped of mapping.dropped_fields ?? []) if (row[dropped.field] !== null && row[dropped.field] !== undefined) losses.push({ kind: 'dropped-field', source_table: mapping.source_table, source_row_sha256: rowHash, field: dropped.field, rationale: dropped.rationale });
+      // v3.2 lets these entity columns be NULL; v4's own routing trigger fills them in (it is not something
+      // this migrator chooses). The target therefore holds a value the source did not, and the audit says so.
+      if (mapping.source_table === 'entities') for (const [field, substitute] of V4_ENTITY_NULL_SUBSTITUTES) if (row[field] === null || row[field] === undefined) losses.push({ kind: 'null-replaced-by-v4-default', source_table: 'entities', source_row_sha256: rowHash, field, rationale: `The source row has no ${field} (NULL). v4's entity routing trigger stores ${substitute} in people/nodes, so the target holds a value the source did not.` });
       if (mapping.source_table === 'embeddings' && row.embedding !== null && row.embedding !== undefined) losses.push({ kind: 'legacy-vector-inventory-only', source_table: mapping.source_table, source_row_sha256: rowHash, field: 'embedding', rationale: 'legacy vectors are inventory-only and are never copied' });
       audit.push({ source_table: mapping.source_table, source_row_sha256: rowHash, target_tables: mapping.target_tables, status: 'mapped' });
     }

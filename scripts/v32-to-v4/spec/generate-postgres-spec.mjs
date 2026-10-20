@@ -70,8 +70,10 @@ export async function generatePostgresSpec({ adminUrl, fixtureDir = FIXTURE_DIR 
   const admin = new Client({ connectionString: adminUrl });
   let client;
   let adapter;
-  await admin.connect();
+  // Everything that can fail is inside the try, so the scratch database and every connection are
+  // cleaned up on any failure, including a failed connect or a failed read of the fixture.
   try {
+    await admin.connect();
     await admin.query(`CREATE DATABASE ${quoteIdentifier(database)}`);
     const url = scratchUrl(adminUrl, database);
     client = new Client({ connectionString: url });

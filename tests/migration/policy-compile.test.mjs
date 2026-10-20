@@ -47,4 +47,20 @@ describe('deterministic policy compilation and transformation', () => {
     expect(canonicalJson(transformed)).not.toContain('[1,2,3]');
     expect(plan.mapping_tables).toContain('entities');
   });
+
+  it('records, per entity, each NULL that the v4 routing trigger will fill in, instead of leaving it to a test comment', () => {
+    const bundle = { ...base, tables: { entities: [
+      { id: 1, name: 'has everything', entity_type: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z' },
+      { id: 2, name: 'no updated_at', entity_type: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00Z', updated_at: null },
+      { id: 3, name: 'nothing at all', entity_type: 'concept', primary_context: null, salience: null, created_at: null, updated_at: null },
+    ] } };
+    const plan = compilePolicy({ bundle, decisions: reviewed(bundle) });
+    const filled = plan.losses.filter((loss) => loss.kind === 'null-replaced-by-v4-default');
+    expect(filled.map((loss) => loss.field).sort()).toEqual(['created_at', 'primary_context', 'salience', 'updated_at', 'updated_at']);
+    expect(filled.every((loss) => loss.source_table === 'entities' && /^[0-9a-f]{64}$/u.test(loss.source_row_sha256) && /v4's entity routing trigger/u.test(loss.rationale))).toBe(true);
+    expect(filled.find((loss) => loss.field === 'updated_at').rationale).toMatch(/import time/u);
+    expect(plan.coverage.entities.losses).toBe(5);
+    // the loss travels into the staging plan the dry run and the receipts are bound to
+    expect(transformRelational({ bundle, compiledPolicy: plan }).losses).toEqual(plan.losses);
+  });
 });

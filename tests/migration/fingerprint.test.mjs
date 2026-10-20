@@ -65,6 +65,17 @@ describe('exact v3.2 source fingerprints', () => {
     expect(() => sourceSpecFor('v3.2-ish')).toThrow();
   });
 
+  it('refuses a foreign key that does not state its actions instead of reading it as NO ACTION', () => {
+    const fk = (extra) => ({ name: 'fk', columns: ['label'], references: { table: 'items', columns: ['id'] }, ...extra });
+    const withFk = (key) => { const value = structuredClone(catalog); value.tables[0].foreign_keys = [key]; return value; };
+    expect(() => normalizeCatalog(withFk(fk({})))).toThrow(/must state both on_delete and on_update/u);
+    expect(() => normalizeCatalog(withFk(fk({ on_delete: 'CASCADE' })))).toThrow(/must state both on_delete and on_update/u);
+    expect(() => normalizeCatalog(withFk(fk({ on_update: 'NO ACTION' })))).toThrow(/must state both on_delete and on_update/u);
+    expect(() => compareCatalog(withFk(fk({ on_delete: '', on_update: 'NO ACTION' })), catalog)).toThrow(/must state both/u);
+    const stated = normalizeCatalog(withFk(fk({ on_delete: 'set null', on_update: 'no action' })));
+    expect(stated.tables[0].foreign_keys[0]).toMatchObject({ on_delete: 'SET NULL', on_update: 'NO ACTION' });
+  });
+
   it('maps every table in both exact fingerprints', () => {
     const mapped = new Set(mapping.map((entry) => entry.source_table));
     for (const kind of ['postgres', 'sqlite']) {

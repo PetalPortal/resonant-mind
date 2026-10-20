@@ -121,15 +121,19 @@ describe.skipIf(!runE2E)('real PostgreSQL v3.2 with every table populated to fre
     const suffix = `${process.pid}_${Date.now()}`;
     const sourceDb = `rmig_rsrc_${suffix}`;
     const targetDb = `rmig_rtgt_${suffix}`;
-    const root = mkdtempSync(join(repo, '.tmp-postgres-e2e-rich-'));
-    const passphrase = join(root, 'passphrase');
-    const bundlePath = join(root, 'bundle.rmigrate');
-    writeFileSync(passphrase, 'postgres-e2e-rich-passphrase', { mode: 0o600 });
-    const admin = await connect(adminUrl);
+    // Nothing that can fail is created outside the try, so the directory, the connections and both
+    // databases are cleaned up whatever fails first.
+    let root;
+    let admin;
     let sourceClient;
     let targetClient;
     let runner;
     try {
+      root = mkdtempSync(join(repo, '.tmp-postgres-e2e-rich-'));
+      const passphrase = join(root, 'passphrase');
+      const bundlePath = join(root, 'bundle.rmigrate');
+      writeFileSync(passphrase, 'postgres-e2e-rich-passphrase', { mode: 0o600 });
+      admin = await connect(adminUrl);
       await admin.query(`CREATE DATABASE ${quoteIdentifier(sourceDb)}`);
       await admin.query(`CREATE DATABASE ${quoteIdentifier(targetDb)}`);
       const sourceUrl = databaseUrl(adminUrl, sourceDb);
@@ -189,6 +193,7 @@ describe.skipIf(!runE2E)('real PostgreSQL v3.2 with every table populated to fre
         // Entities: person kinds go to people, the rest to nodes, ids and names kept. The one value the
         // target invents is updated_at for a source NULL: v4's own routing trigger writes the import
         // time there (COALESCE(NEW.updated_at, NOW()), as its upgrade of an existing database does).
+        // That is recorded as a 'null-replaced-by-v4-default' entry in the loss report (checked below).
         const entities = await both(
           `SELECT id, name, entity_type, salience, primary_context, ${ts('created_at')} AS created_at, ${ts('updated_at')} AS updated_at FROM entities ORDER BY id`,
           `SELECT id, name, kind AS entity_type, salience, primary_context, ${ts('created_at')} AS created_at, ${ts('updated_at')} AS updated_at FROM (SELECT * FROM people UNION ALL SELECT * FROM nodes) e ORDER BY id`,
@@ -233,7 +238,7 @@ describe.skipIf(!runE2E)('real PostgreSQL v3.2 with every table populated to fre
         expect(plan.reembed_jobs.jobs.length).toBeGreaterThan(0);
         expect(JSON.stringify(plan)).not.toMatch(/0\.125/u);
         const lost = plan.losses.map((loss) => `${loss.kind}:${loss.source_table}.${loss.field}`);
-        expect(lost).toEqual(expect.arrayContaining(['dropped-field:observations.charge_note', 'dropped-field:entities.intentionally_isolated', 'dropped-field:embeddings.embedding']));
+        expect(lost).toEqual(expect.arrayContaining(['dropped-field:observations.charge_note', 'dropped-field:entities.intentionally_isolated', 'dropped-field:embeddings.embedding', 'null-replaced-by-v4-default:entities.updated_at']));
       } finally {
         await sourceRead.end();
       }
@@ -241,10 +246,10 @@ describe.skipIf(!runE2E)('real PostgreSQL v3.2 with every table populated to fre
       await runner?.close().catch(() => {});
       await sourceClient?.end().catch(() => {});
       await targetClient?.end().catch(() => {});
-      await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(sourceDb)} WITH (FORCE)`).catch(() => {});
-      await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(targetDb)} WITH (FORCE)`).catch(() => {});
-      await admin.end();
-      rmSync(root, { recursive: true, force: true });
+      await admin?.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(sourceDb)} WITH (FORCE)`).catch(() => {});
+      await admin?.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(targetDb)} WITH (FORCE)`).catch(() => {});
+      await admin?.end().catch(() => {});
+      if (root !== undefined) rmSync(root, { recursive: true, force: true });
     }
   }, 240_000);
 });
