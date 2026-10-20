@@ -1,36 +1,26 @@
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { verifyBundle, readBundleMember } from '../lib/bundle.mjs';
-import { canonicalJson } from '../lib/canonical-json.mjs';
+import { loadVerifiedBundle } from '../policy/generate.mjs';
 import { compilePolicy } from '../policy/compile.mjs';
-import { MigrationRefusal } from '../lib/refusal.mjs';
+import { assertCanWriteArtifact, plaintextChoice, writeArtifactNew } from './artifacts.mjs';
+import { parseOptions, readJsonFile } from './shared.mjs';
 
-function refusal(summary) { return new MigrationRefusal({ code: 'RMIG-E-SOURCE-ARG', phase: 'compile-policy', summary, safe_details: {}, report_path: null }); }
-function parseFlags(argv) {
-  const out = {};
-  for (let i = 0; i < argv.length; i += 1) {
-    const key = argv[i]; if (!['--bundle', '--decisions', '--out', '--passphrase-file'].includes(key)) throw refusal('compile-policy accepts only --bundle, --decisions, --out, and --passphrase-file.');
-    const value = argv[++i]; if (!value || value.startsWith('--') || out[key]) throw refusal(`compile-policy requires one value for ${key}.`); out[key] = value;
-  }
-  if (!out['--bundle'] || !out['--decisions'] || !out['--out']) throw refusal('compile-policy requires --bundle, --decisions, and --out.');
-  return { bundlePath: out['--bundle'], decisionsPath: out['--decisions'], outPath: out['--out'], passphraseFile: out['--passphrase-file'] };
+const PHASE = 'compile-policy';
+
+export function parseCompilePolicyArgs(argv) {
+  const values = parseOptions(PHASE, argv, { required: ['--bundle', '--decisions', '--out'], optional: ['--passphrase-file'], switches: ['--allow-plaintext-artifact', '--acknowledge-plaintext-risk'] });
+  return { bundlePath: values['--bundle'], decisionsPath: values['--decisions'], outPath: values['--out'], passphraseFile: values['--passphrase-file'], plaintext: plaintextChoice(PHASE, values) };
 }
-function readBundle(path, passphraseFile) {
-  const verified = verifyBundle({ path, passphraseFile });
-  const tables = {};
-  for (const member of verified.manifest.members) if (member.name.startsWith('data/')) {
-    const data = readBundleMember({ path, manifest: verified.manifest, member, passphraseFile }).toString('utf8');
-    tables[member.name.slice(5).replace(/\.ndjson(?:\.enc)?$/u, '')] = data.split('\n').filter(Boolean).map((line) => JSON.parse(line));
-  }
-  const envelope = JSON.parse(readFileSync(join(path, 'envelope.json'), 'utf8'));
-  return { tables, source_kind: verified.manifest.source_kind, migration_id: verified.manifest.migration_id, bundle_manifest_sha256: envelope.manifest_sha256, manifest: verified.manifest };
-}
-export function parseCompilePolicyArgs(argv) { return parseFlags(argv); }
-export function compilePolicyCommand({ bundlePath, decisionsPath, outPath, passphraseFile }) {
-  const bundle = readBundle(bundlePath, passphraseFile);
-  let decisions; try { decisions = JSON.parse(readFileSync(decisionsPath, 'utf8')); } catch { throw refusal('The decision manifest is missing or invalid JSON.'); }
+
+/**
+ * Compiles the reviewed decisions into the policy. The policy holds migrated content (entity names, merged
+ * values), so it is written encrypted with the bundle's passphrase file unless both plaintext flags are
+ * given, and an existing file is never replaced. The result is a summary: the policy is not printed.
+ */
+export function compilePolicyCommand({ bundlePath, decisionsPath, outPath, passphraseFile, plaintext = false }) {
+  assertCanWriteArtifact(PHASE, 'compiled-policy', { passphraseFile, plaintext });
+  const bundle = loadVerifiedBundle(bundlePath, { passphraseFile });
+  const decisions = readJsonFile(PHASE, decisionsPath, 'The decision manifest');
   const plan = compilePolicy({ bundle, decisions });
-  mkdirSync(dirname(outPath), { recursive: true }); const tmp = `${outPath}.tmp-${process.pid}`; writeFileSync(tmp, canonicalJson(plan), { mode: 0o600 }); renameSync(tmp, outPath);
-  return plan;
+  const { encrypted } = writeArtifactNew(PHASE, outPath, plan, { kind: 'compiled-policy', passphraseFile, plaintext });
+  return { command: PHASE, migration_id: plan.migration_id, bundle_manifest_sha256: plan.bundle_manifest_sha256, decision_manifest_sha256: plan.decision_manifest_sha256, plan_sha256: plan.plan_sha256, losses: plan.losses.length, encrypted, out: outPath };
 }
-export function humanCompilePolicyResult(result) { return `compile-policy: complete; plan_sha256=${result.plan_sha256}; losses=${result.losses.length}\n`; }
+export function humanCompilePolicyResult(result) { return `compile-policy: complete; plan_sha256=${result.plan_sha256}; losses=${result.losses}; ${result.encrypted ? 'encrypted' : 'PLAINTEXT'}; out=${result.out}\n`; }

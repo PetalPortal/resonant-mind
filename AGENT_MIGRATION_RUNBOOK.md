@@ -184,7 +184,7 @@ STOP: RMIG-E-TARGET-SCHEMA: the target does not have the exact released v4 schem
 
 ### `FRESH_TARGET_ACCEPTED -> DRY_RUN_ACCEPTED`
 
-Run `prepare-target` (with the relational plan from `plan-relational`), then `dry-run` with `--receipt-out`. Require a successful receipt bound to all of:
+Run `prepare-target` (with the relational plan from `plan-relational`), then `dry-run` with `--receipt-out`. The compiled policy and the relational plan hold the migrated content, so `compile-policy` and `plan-relational` write them encrypted with the migration passphrase file, and every command that reads them (`prepare-target`, `dry-run`, `import`, `plan-images`, `plan-reembed`, `validate`) takes the same `--passphrase-file`. The agent never writes either as plaintext (`--allow-plaintext-artifact --acknowledge-plaintext-risk`) unless the human operator has authorized that exact exception, and no command overwrites an existing output: use new paths. Require a successful receipt bound to all of:
 
 - `migration_id`;
 - source identity and source report hash;
@@ -221,7 +221,7 @@ A successful relational import is not complete. It is only the `IMPORT_ACCEPTED`
 
 External work is explicit and separately authorized:
 
-- **R2/images:** an operator or separately authorized provider job copies objects. The agent may make an inventory, create a plan, and validate a signed receipt with a trusted public key. It must not obtain hidden R2 credentials, automatically copy over the network, accept unsigned JSON, or declare metadata-only success.
+- **R2/images:** an operator or separately authorized provider job copies objects. The agent may make an inventory, create a plan, and validate a signed receipt with a trusted public key. The image plan is taken from the relational plan with `plan-images --plan`; `validate` accepts no other image plan, so a smaller, empty or different plan is a finding even with a matching receipt. It must not obtain hidden R2 credentials, automatically copy over the network, accept unsigned JSON, or declare metadata-only success.
 - **Re-embedding:** an operator/provider executes the generated plan. The agent may validate receipts, not invoke a provider with hidden credentials. Old vectors remain discarded. If the policy intentionally defers this phase, the state is `data-imported-not-search-ready` and cannot become complete/search-ready by wording alone.
 - **Network/provider state:** no automatic network phase is inferred from a local job plan, a provider configuration, or a generated command. Require external receipts with the same hashes and `migration_id`.
 
@@ -242,13 +242,13 @@ Run the exact `validate` and `status` commands in the user guide. `validate` rea
 - the decisions compile to the policy the plan was built from, and the plan is what that policy produces from the bundle;
 - the live source still equals the bundle, row for row;
 - every mapped column of every source row against the live target (exact text, timestamps to the microsecond), each difference accounted for by a recorded policy entry, and the plan against the target;
-- the target's constraints, indexes, foreign keys, CHECK expressions, sequences, routing, version order and migration-set record;
+- the target's constraints, indexes, foreign keys, CHECK expressions, sequences, routing, version order and migration-set record (only the released v4 schema's own CHECK expressions are evaluated; any other CHECK in the target is a finding and is never run);
 - declared losses, including the `null-replaced-by-v4-default` entries for NULLs that v4 fills in;
-- image plan/receipt completeness and signature trust, and the re-embedding plan/receipts (supplied evidence is validated; evidence not supplied leaves the state at `data-imported-images-pending` or `data-imported-not-search-ready`, never ready);
+- image plan/receipt completeness and signature trust, where the image plan must be the planned inventory and every imported image row must be listed in it, and the re-embedding plan/receipts, whose receipts are checked against the content the target holds now (supplied evidence is validated; evidence not supplied leaves the state at `data-imported-images-pending` or `data-imported-not-search-ready`, never ready);
 - dry-run and import receipts, the import receipt against the target's own record;
-- report hash and `migration_id`.
+- report hash and `migration_id`, and, with a passphrase file, a keyed seal on the report.
 
-Any finding makes `validate` exit with `RMIG-E-VALIDATION` (exit code 2) after writing the report with status `refused`; the report path is in the refusal. `status` is a report reader and readiness calculator. It never changes target state. A report with violations is not “mostly ready.” The agent never reruns `validate` to a path it has already used, edits a report to clear a finding, or points `validate` at a different source, target or plan to make a check pass.
+Any finding makes `validate` exit with `RMIG-E-VALIDATION` (exit code 2) after writing the report with status `refused`; the report path is in the refusal (or the refusal says the path is withheld, because it contained text that looks like a secret; the report is then at the `--out` the agent gave). Pass `--passphrase-file` to `validate` and to `status`. `status` is a report reader and readiness calculator; it never changes target state, and it reports a state only for a report whose hash is its own and whose keyed seal verifies. A report without a seal is shown as `unverified` and is not proof; a report whose seal fails, or cutover evidence that does not validate, exits 2 as `refused`. The agent never treats an `unverified` or `refused` status as readiness. A report with violations is not “mostly ready.” The agent never reruns `validate` to a path it has already used, edits a report to clear a finding, or points `validate` at a different source, target or plan to make a check pass.
 
 ```text
 STOP: RMIG-E-VALIDATION: validation found a violation. Resolve every finding and rerun validation; do not edit the report or suppress the violation.

@@ -1,7 +1,9 @@
 import { canonicalJson } from '../lib/canonical-json.mjs';
 import { canonicalSha256 } from '../lib/hash.mjs';
-import { KIND_NORMALIZATIONS, ISO_WITH_OFFSET, SQLITE_UTC, TIMESTAMP_FIELDS, DATE_FIELDS, choiceForItem } from '../policy/generate.mjs';
+import { KIND_NORMALIZATIONS, ISO_WITH_OFFSET, SQLITE_UTC, TIMESTAMP_FIELDS, DATE_FIELDS, decisionItemForCell } from '../policy/generate.mjs';
 import { choiceAction } from './id-map.mjs';
+import { numbersSurviveParsing } from '../lib/lossless-json.mjs';
+import { parseInstantMicros } from '../lib/instant.mjs';
 
 const ENUMS = {
   status: new Set(['active', 'resolved']),
@@ -23,32 +25,33 @@ const CONTEXTS = new Set(['default', 'primary', 'private', 'public', 'personal',
 const ENUM_FIELDS = new Set(['observations.salience', 'observations.weight', 'observations.certainty', 'observations.charge', 'observations.source', 'threads.thread_type', 'threads.status', 'threads.priority', 'relational_state.intensity']);
 function action(choice) { return choiceAction(choice); }
 function missing(value) { return value === null || value === undefined || value === ''; }
-function policyChoice(policy, row, table, type, field) { const rowHash = canonicalSha256(row); return (policy?.items ?? []).find((item) => item.source_table === table && item.source_row_sha256 === rowHash && item.type === type && (!item.field || item.field === field)); }
+function policyChoice(policy, row, table, type, field) { return decisionItemForCell(policy, { table, rowHash: canonicalSha256(row), type, field }); }
 // A JavaScript Date counts milliseconds, PostgreSQL timestamptz counts microseconds, and the v4
 // columns are timestamptz. toISOString() alone would drop the last three digits of a v3.2 value such
-// as 2026-01-02T03:04:05.987654Z, which changes the stored instant. The digits the source text had
-// are kept (up to six); a value with three or fewer significant digits keeps the usual
-// toISOString() form, so SQLite and millisecond sources are unchanged. Finer than a microsecond
-// cannot come from PostgreSQL and is refused rather than rounded.
-function utcIso(date, text) {
-  const iso = date.toISOString();
-  const fraction = /[T ]\d{2}:\d{2}:\d{2}\.(\d+)/u.exec(text)?.[1] ?? '';
-  if (fraction.length <= 3) return iso;
-  if (/[1-9]/u.test(fraction.slice(6))) throw new Error('Timestamp has more than microsecond precision and would be rounded.');
-  const micro = fraction.slice(0, 6).padEnd(6, '0');
-  return micro.endsWith('000') ? iso : `${iso.slice(0, 19)}.${micro}Z`;
+// as 2026-01-02T03:04:05.987654Z, which changes the stored instant, and new Date() accepts
+// 2026-02-30 (as 1 March) and T24:00:00 (as the next midnight), which changes the date. So the text is read
+// exactly first (lib/instant.mjs, integer arithmetic, a real calendar instant or a refusal), and the Date
+// is only used to print it. The digits the source had are kept (up to six); a value that is whole to the
+// millisecond keeps the usual toISOString() form, so SQLite and millisecond sources are unchanged. Finer
+// than a microsecond cannot come from PostgreSQL and is refused rather than rounded.
+const NAIVE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/u;
+function isoFromMicros(micros) {
+  const milliseconds = micros >= 0n ? micros / 1000n : -((-micros + 999n) / 1000n);
+  const iso = new Date(Number(milliseconds)).toISOString();
+  if (micros - milliseconds * 1000n === 0n) return iso;
+  const inSecond = ((micros % 1_000_000n) + 1_000_000n) % 1_000_000n;
+  return `${iso.slice(0, 19)}.${String(inSecond).padStart(6, '0')}Z`;
 }
 export function normalizeTimestamp(value, { choice, table, field } = {}) {
   if (missing(value)) return value ?? null;
   if (typeof value !== 'string') throw new Error(`Timestamp ${table ?? 'row'}.${field ?? 'value'} requires a reviewed choice.`);
-  if (ISO_WITH_OFFSET.test(value)) { const date = new Date(value); if (!Number.isNaN(date.valueOf())) return utcIso(date, value); }
-  if (SQLITE_UTC.test(value)) { const date = new Date(`${value.replace(' ', 'T')}Z`); if (!Number.isNaN(date.valueOf())) return utcIso(date, value); }
+  if (ISO_WITH_OFFSET.test(value) || SQLITE_UTC.test(value)) return isoFromMicros(parseInstantMicros(value, { naiveOffset: 'UTC' })); // SQLite's own form is UTC; an invalid calendar value throws
   const selected = choice?.choice ?? choice;
   if (action(selected) !== 'normalize-utc') throw new Error(`Timestamp ${table ?? 'row'}.${field ?? 'value'} is ambiguous.`);
   const timezone = selected?.timezone ?? selected?.timezone_offset;
   if (typeof timezone !== 'string' || !/^(?:UTC|Z|[+-]\d{2}:?\d{2})$/u.test(timezone)) throw new Error('Naive timestamps require an explicit reviewed timezone.');
-  const date = new Date(`${value.replace(' ', 'T')}${timezone === 'UTC' || timezone === 'Z' ? 'Z' : timezone}`); if (Number.isNaN(date.valueOf())) throw new Error('Reviewed timestamp choice does not produce a valid timestamp.');
-  return utcIso(date, value);
+  if (!NAIVE_TIMESTAMP.test(value)) throw new Error('A reviewed timezone applies only to a timestamp that has no offset of its own.');
+  return isoFromMicros(parseInstantMicros(value, { naiveOffset: timezone }));
 }
 export function normalizeDate(value, { choice, table, field } = {}) {
   if (missing(value)) return value ?? null;
@@ -63,7 +66,7 @@ export function normalizeDate(value, { choice, table, field } = {}) {
 export function normalizeJson(value, expectedShape, { choice } = {}) {
   if (missing(value)) return value ?? null;
   let parsed = value;
-  if (typeof value === 'string') { try { parsed = JSON.parse(value); } catch { parsed = undefined; } }
+  if (typeof value === 'string') { try { parsed = JSON.parse(value); } catch { parsed = undefined; } if (parsed !== undefined && !numbersSurviveParsing(value)) parsed = undefined; }
   const valid = expectedShape === 'array' ? Array.isArray(parsed) : expectedShape === 'integer-array' ? Array.isArray(parsed) && parsed.every((item) => Number.isSafeInteger(typeof item === 'number' ? item : Number(item))) : expectedShape === 'object' ? parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) : Array.isArray(parsed) || (parsed !== null && typeof parsed === 'object');
   if (valid) return parsed;
   const selected = choice?.choice ?? choice;

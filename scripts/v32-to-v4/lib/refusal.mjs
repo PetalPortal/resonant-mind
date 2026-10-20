@@ -42,6 +42,7 @@ const REMEDIATIONS = Object.freeze({
 export const EXPECTED_REFUSAL_CODES = Object.freeze(Object.keys(REMEDIATIONS));
 const REFUSAL_CODES = new Set(EXPECTED_REFUSAL_CODES);
 const PHASES = new Set(MIGRATION_PHASES);
+const CONTROL_CHARACTER = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`, "u");
 const REQUIRED_FIELDS = ['code', 'phase', 'summary', 'safe_details', 'report_path'];
 
 function assertSafeText(value, label, { nullable = false } = {}) {
@@ -89,7 +90,12 @@ export class MigrationRefusal extends Error {
     assertPlainObject(fields.safe_details, 'safe_details');
     assertPlainData(fields.safe_details, 'safe_details');
     const safeDetailsValue = redact(fields.safe_details);
-    const safeReportPath = fields.report_path === null ? null : redactText(fields.report_path);
+    // A refusal names the real report path or says it was withheld; it never names a different one. A path
+    // the redactor would rewrite (it holds text that looks like a secret, or a control character) is not
+    // rewritten into a path that does not exist: it is dropped and the refusal says so.
+    const requestedPath = fields.report_path;
+    const pathWithheld = requestedPath !== null && (typeof requestedPath !== 'string' || requestedPath.length === 0 || requestedPath !== requestedPath.trim() || CONTROL_CHARACTER.test(requestedPath) || redactText(requestedPath) !== requestedPath);
+    const safeReportPath = requestedPath === null || pathWithheld ? null : requestedPath;
     assertSafeText(safeSummary, 'MigrationRefusal summary');
     assertSafeDetails(safeDetailsValue);
     assertSafeText(safeReportPath, 'MigrationRefusal report_path', { nullable: true });
@@ -103,6 +109,7 @@ export class MigrationRefusal extends Error {
     this.safe_details = safeDetails;
     this.remediation = REMEDIATIONS[fields.code];
     this.report_path = safeReportPath;
+    if (pathWithheld) this.report_path_withheld = true;
     Object.freeze(this);
   }
 
@@ -114,6 +121,7 @@ export class MigrationRefusal extends Error {
       safe_details: this.safe_details,
       remediation: this.remediation,
       report_path: this.report_path,
+      ...(this.report_path_withheld === true ? { report_path_withheld: true } : {}),
     };
   }
 }
@@ -139,7 +147,7 @@ export function serializeRefusal(refusal, { json = false } = {}) {
   if (json) {
     return canonicalJson(refusal.toJSON());
   }
-  const report = refusal.report_path === null ? '' : ` Report: ${refusal.report_path}`;
+  const report = refusal.report_path !== null ? ` Report: ${refusal.report_path}` : refusal.report_path_withheld === true ? ' A report was written, but its path is withheld because it contains text that looks like a secret; it is at the path you gave --out or --report.' : '';
   return `${refusal.code}: ${refusal.summary} ${refusal.remediation}${report}\n`;
 }
 

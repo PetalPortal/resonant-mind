@@ -1,0 +1,68 @@
+import { readFileSync } from 'node:fs';
+import pg from 'pg';
+import { describe, expect, it } from 'vitest';
+import { migrationSetSha256, readV4Migrations, V4_MIGRATION_LOCK_ID, applyV4Migrations } from '../../scripts/migrate-postgres.mjs';
+import { CHECKS_SPEC_PATH, generateV4ChecksSpec, loadExpectedChecks } from '../../scripts/v32-to-v4/spec/v4-checks.mjs';
+import { postgresClientConfig } from '../../scripts/v32-to-v4/source/postgres-v32.mjs';
+import { Findings } from '../../scripts/v32-to-v4/validate/compare.mjs';
+import { readLiveTarget } from '../../scripts/v32-to-v4/validate/live-target.mjs';
+import { adminUrl, hasAdminDatabase, withScratchDatabase } from './helpers/postgres-scratch.mjs';
+
+const { Client } = pg;
+
+describe.skipIf(!hasAdminDatabase)('the released v4 CHECK constraints, against a live PostgreSQL (TEST_ADMIN_DATABASE_URL)', () => {
+  it('the committed v4-checks.json is exactly what the released migrations yield on this PostgreSQL', async () => {
+    const generated = await generateV4ChecksSpec({ adminUrl });
+    let committed;
+    try { committed = readFileSync(CHECKS_SPEC_PATH, 'utf8').replaceAll('\r\n', '\n'); } catch { throw new Error(`spec/v4-checks.json is missing; this is what it should hold:\n${generated.text}`); }
+    expect(JSON.parse(committed)).toEqual(generated.spec);
+    expect(generated.spec.migration_set_sha256).toBe(migrationSetSha256(await readV4Migrations()));
+    expect(generated.spec.checks.length).toBeGreaterThan(15);
+  }, 120_000);
+
+  it('evaluates the released constraints, and never runs a CHECK the released schema does not have', async () => {
+    await withScratchDatabase(async (url) => {
+      const setup = new Client({ connectionString: url });
+      await setup.connect();
+      try {
+        await applyV4Migrations({ client: setup, migrations: await readV4Migrations(), lockId: V4_MIGRATION_LOCK_ID });
+        // a function that cannot be allowed to run: evaluating it raises, and so does anything that reaches it
+        await setup.query("INSERT INTO public.journals (content) VALUES ('a row, so that an evaluated CHECK would really run')");
+        await setup.query("CREATE FUNCTION public.rmig_must_not_run(text) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $$ BEGIN RAISE EXCEPTION 'executed from a target CHECK'; END $$");
+      } finally { await setup.end(); }
+
+      const read = async () => {
+        const client = new Client({ ...postgresClientConfig(url), ssl: false });
+        await client.connect();
+        const findings = new Findings();
+        try { return { live: await readLiveTarget({ client, migrationId: 'rmig_checks_it_01', findings }), findings }; } finally { await client.end(); }
+      };
+
+      const clean = await read();
+      expect(Object.keys(clean.findings.counts).filter((check) => check.startsWith('check-'))).toEqual([]);
+      expect(clean.live.checks.check_constraints).toBe(loadExpectedChecks().checks.length);
+
+      const alter = new Client({ connectionString: url });
+      await alter.connect();
+      try {
+        await alter.query('ALTER TABLE public.journals ADD CONSTRAINT journals_boom CHECK (public.rmig_must_not_run(content)) NOT VALID');
+        await alter.query("ALTER TABLE public.journals ADD CONSTRAINT journals_sleep CHECK (pg_catalog.length(pg_catalog.pg_read_file('/etc/hostname')) >= 0) NOT VALID");
+      } finally { await alter.end(); }
+      const extra = await read(); // it must not throw: nothing the target defines is evaluated
+      expect(extra.findings.counts['check-constraint-unexpected']).toBe(2);
+      expect(extra.findings.samples.filter((item) => item.check === 'check-constraint-unexpected').map((item) => item.constraint).sort()).toEqual(['journals_boom', 'journals_sleep']);
+      expect(extra.live.checks.check_constraints_unexpected).toBe(2);
+
+      // a released constraint whose definition was changed is as unexpected as a new one, and one that was dropped is missing
+      const change = new Client({ connectionString: url });
+      await change.connect();
+      let victim;
+      try {
+        victim = (await change.query("SELECT conname, conrelid::regclass::text AS table_name FROM pg_constraint WHERE contype = 'c' AND connamespace = 'public'::regnamespace AND conname NOT LIKE 'journals_%' ORDER BY conname LIMIT 1")).rows[0];
+        await change.query(`ALTER TABLE ${victim.table_name} DROP CONSTRAINT ${victim.conname}`);
+      } finally { await change.end(); }
+      const dropped = await read();
+      expect(dropped.findings.counts['check-constraint-missing']).toBe(1);
+    });
+  }, 180_000);
+});

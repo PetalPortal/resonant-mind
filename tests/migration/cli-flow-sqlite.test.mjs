@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
+import { readArtifactFile } from './helpers/artifacts.mjs';
 import { runCli } from './helpers/cli-run.mjs';
 import { SQLITE_REVIEW as REVIEW, createSqliteSource } from './helpers/seeds.mjs';
 
@@ -70,6 +71,15 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
     const staleRun = runCli(['apply-decisions', '--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase'), '--decisions', file('stale.json'), '--reviewed-by', 'Test Reviewer', '--out', file('never4.json')]);
     expect(staleRun.status).toBe(2);
     expect(staleRun.stderr).toContain('RMIG-E-POLICY-MISMATCH');
+
+    // a decision file drafted for another migration is refused at apply time, even with a complete review
+    const elsewhere = { ...state.draft, migration_id: 'rmig_another_run_99', items: state.draft.items.map(choose) };
+    writeFileSync(file('elsewhere.json'), JSON.stringify(elsewhere));
+    const elsewhereRun = runCli(['apply-decisions', '--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase'), '--decisions', file('elsewhere.json'), '--reviewed-by', 'Test Reviewer', '--out', file('never5.json')]);
+    expect(elsewhereRun.status).toBe(2);
+    expect(elsewhereRun.stderr).toContain('RMIG-E-POLICY-MISMATCH');
+    expect(elsewhereRun.stderr).toContain('different migration');
+    expect(existsSync(file('never5.json'))).toBe(false);
   }, 180_000);
 
   it('applies a complete review, compiles the policy and builds the relational plan', () => {
@@ -84,13 +94,15 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
 
     const compiled = runCli(['compile-policy', '--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase'), '--decisions', file('decisions-reviewed.json'), '--out', file('compiled-policy.json')]);
     expect(compiled.status, compiled.output).toBe(0);
-    const policy = JSON.parse(readFileSync(file('compiled-policy.json'), 'utf8'));
+    const policy = readArtifactFile(file('compiled-policy.json'), 'compiled-policy', file('passphrase'));
+    expect(compiled.stdout).toMatch(/^compile-policy: complete; plan_sha256=[0-9a-f]{64}; losses=\d+; encrypted; out=/u);
     expect(policy.decision_manifest_sha256).toBe(state.reviewed.manifest_sha256);
 
     const planned = runCli(['plan-relational', '--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase'), '--compiled-policy', file('compiled-policy.json'), '--out', file('plan.json')]);
     expect(planned.status, planned.output).toBe(0);
-    expect(planned.stdout).toMatch(/^plan-relational: complete; rows=\d+; losses=\d+; images=0; reembed_jobs=\d+; migration_id=rmig_cli_sqlite_01; bundle_manifest_sha256=[0-9a-f]{64}; compiled_policy_sha256=[0-9a-f]{64}; plan_sha256=[0-9a-f]{64}; out=/u);
-    const plan = JSON.parse(readFileSync(file('plan.json'), 'utf8'));
+    expect(planned.stdout).toMatch(/^plan-relational: complete; rows=\d+; losses=\d+; images=0; reembed_jobs=\d+; migration_id=rmig_cli_sqlite_01; bundle_manifest_sha256=[0-9a-f]{64}; compiled_policy_sha256=[0-9a-f]{64}; plan_sha256=[0-9a-f]{64}; encrypted; out=/u);
+    const plan = readArtifactFile(file('plan.json'), 'relational-plan', file('passphrase'));
+    expect(planned.stdout).toContain('; encrypted; out=');
     expect(plan.compiled_policy_sha256).toBe(policy.plan_sha256);
     expect(plan.members.nodes.map((row) => row.name).sort()).toEqual(['Ada (work)', 'Rhizome']);
     expect(plan.members.people.map((row) => row.name)).toEqual(['Ada (person)']);
@@ -104,7 +116,7 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
   }, 180_000);
 
   it('refuses a policy that was changed after compile-policy wrote it, and never overwrites an earlier plan', () => {
-    const policy = JSON.parse(readFileSync(file('compiled-policy.json'), 'utf8'));
+    const policy = readArtifactFile(file('compiled-policy.json'), 'compiled-policy', file('passphrase'));
     policy.excluded_rows = [...policy.excluded_rows, `observations:${'0'.repeat(64)}`];
     writeFileSync(file('tampered-policy.json'), JSON.stringify(policy));
     const tampered = runCli(['plan-relational', '--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase'), '--compiled-policy', file('tampered-policy.json'), '--out', file('plan-tampered.json')]);
@@ -115,6 +127,77 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
     expect(again.status).toBe(2);
     expect(again.stderr).toMatch(/already exists/u);
   }, 180_000);
+
+  it('writes the compiled policy and the plan encrypted, plaintext only on both flags, opens either form, and never replaces an earlier file', () => {
+    // encrypted by default: the file is not JSON and holds none of the migrated content
+    for (const name of ['compiled-policy.json', 'plan.json']) {
+      const raw = readFileSync(file(name));
+      expect(raw.subarray(0, 8).toString('ascii'), name).toBe('RMIGART1');
+      expect(raw.toString('latin1'), name).not.toContain('Rhizome');
+      expect(raw.toString('latin1'), name).not.toContain('Ada (work)');
+    }
+    const decisions = ['--decisions', file('decisions-reviewed.json')];
+    const bundle = ['--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase')];
+
+    // one acknowledgement flag is not enough, for either command
+    for (const flag of ['--allow-plaintext-artifact', '--acknowledge-plaintext-risk']) {
+      const one = runCli(['compile-policy', ...bundle, ...decisions, '--out', file('one-flag.json'), flag]);
+      expect(one.status, flag).toBe(2);
+      expect(one.stderr, flag).toContain('RMIG-E-BUNDLE-PLAINTEXT-ACK');
+      expect(existsSync(file('one-flag.json')), flag).toBe(false);
+    }
+    const planOne = runCli(['plan-relational', ...bundle, '--compiled-policy', file('compiled-policy.json'), '--out', file('one-flag-plan.json'), '--allow-plaintext-artifact']);
+    expect(planOne.stderr).toContain('RMIG-E-BUNDLE-PLAINTEXT-ACK');
+
+    // both flags: readable canonical JSON, and every reader accepts it
+    const plain = runCli(['compile-policy', ...bundle, ...decisions, '--out', file('policy-plain.json'), '--allow-plaintext-artifact', '--acknowledge-plaintext-risk']);
+    expect(plain.status, plain.output).toBe(0);
+    expect(plain.stdout).toContain('PLAINTEXT');
+    expect(readFileSync(file('policy-plain.json'), 'utf8')).toContain('Rhizome');
+    expect(readArtifactFile(file('policy-plain.json'), 'compiled-policy').plan_sha256).toBe(readArtifactFile(file('compiled-policy.json'), 'compiled-policy', file('passphrase')).plan_sha256);
+    const planPlain = runCli(['plan-relational', ...bundle, '--compiled-policy', file('policy-plain.json'), '--out', file('plan-plain.json'), '--allow-plaintext-artifact', '--acknowledge-plaintext-risk']);
+    expect(planPlain.status, planPlain.output).toBe(0);
+    expect(JSON.parse(readFileSync(file('plan-plain.json'), 'utf8')).plan_sha256).toBe(state.plan.plan_sha256);
+    // an encrypted plan built from the encrypted policy has the same content as the plaintext route
+    const planFromSealed = runCli(['plan-relational', ...bundle, '--compiled-policy', file('compiled-policy.json'), '--out', file('plan-from-sealed.json')]);
+    expect(planFromSealed.status, planFromSealed.output).toBe(0);
+    expect(readArtifactFile(file('plan-from-sealed.json'), 'relational-plan', file('passphrase')).plan_sha256).toBe(state.plan.plan_sha256);
+
+    // a wrong passphrase, a missing one, and an artifact of the wrong kind are refused
+    writeFileSync(file('other-passphrase-2'), 'not-the-passphrase', { mode: 0o600 });
+    const readsOther = runCli(['plan-images', '--plan', file('plan.json'), '--passphrase-file', file('other-passphrase-2'), '--out', file('images-wrong.json')]);
+    expect(readsOther.status).toBe(2);
+    expect(readsOther.stderr).toContain('RMIG-E-BUNDLE-DECRYPT');
+    const noKey = runCli(['plan-images', '--plan', file('plan.json'), '--out', file('images-nokey.json')], { RM_MIGRATION_PASSPHRASE_FILE: '' });
+    expect(noKey.status).toBe(2);
+    expect(noKey.stderr).toContain('RMIG-E-BUNDLE-DECRYPT');
+    const wrongKind = runCli(['plan-relational', ...bundle, '--compiled-policy', file('plan.json'), '--out', file('plan-wrongkind.json')]);
+    expect(wrongKind.status).toBe(2);
+    expect(wrongKind.stderr).toContain('RMIG-E-BUNDLE-DECRYPT');
+    expect(existsSync(file('plan-wrongkind.json'))).toBe(false);
+
+    // nothing replaces an earlier file: compile-policy, plan-images, plan-reembed
+    const before = readFileSync(file('compiled-policy.json'));
+    const again = runCli(['compile-policy', ...bundle, ...decisions, '--out', file('compiled-policy.json')]);
+    expect(again.status).toBe(2);
+    expect(again.stderr).toMatch(/already exists/u);
+    expect(readFileSync(file('compiled-policy.json')).equals(before)).toBe(true);
+    const images = runCli(['plan-images', '--plan', file('plan.json'), '--passphrase-file', file('passphrase'), '--out', file('image-plan.json')]);
+    expect(images.status, images.output).toBe(0);
+    expect(JSON.parse(readFileSync(file('image-plan.json'), 'utf8'))).toEqual(state.plan.image_inventory);
+    const imagesAgain = runCli(['plan-images', '--plan', file('plan.json'), '--passphrase-file', file('passphrase'), '--out', file('image-plan.json')]);
+    expect(imagesAgain.status).toBe(2);
+    expect(imagesAgain.stderr).toMatch(/already exists/u);
+    const reembed = ['plan-reembed', '--input', file('plan.json'), '--passphrase-file', file('passphrase'), '--migration-id', 'rmig_cli_sqlite_01', '--out', file('reembed-plan.json')];
+    expect(runCli(reembed).status).toBe(0);
+    const reembedAgain = runCli(reembed);
+    expect(reembedAgain.status).toBe(2);
+    expect(reembedAgain.stderr).toMatch(/already exists/u);
+    // --plan carries its own bindings; mixing them with the standalone options is refused
+    const mixed = runCli(['plan-images', '--plan', file('plan.json'), '--passphrase-file', file('passphrase'), '--migration-id', 'rmig_cli_sqlite_01', '--out', file('image-plan-2.json')]);
+    expect(mixed.status).toBe(2);
+    expect(existsSync(file('image-plan-2.json'))).toBe(false);
+  }, 240_000);
 
   it('refuses decisions that no longer match the bundle, and a wrong passphrase', () => {
     writeFileSync(file('other-passphrase'), 'not-the-passphrase', { mode: 0o600 });

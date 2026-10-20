@@ -43,6 +43,8 @@ function successfulReceipt(receipt, statuses, { migrationId, kind, dryRunReceipt
 }
 function receiptHash(value) { return value ? canonicalSha256(value) : null; }
 function hashBody(value, field) { const copy = { ...value }; delete copy[field]; return canonicalSha256(copy); }
+// The hash of a validation report covers everything except itself and its keyed seal (the seal is made over the hash).
+export function reportBodyHash(report) { const copy = { ...report }; delete copy.report_sha256; delete copy.report_seal; return canonicalSha256(copy); }
 export function validateOperatorCutoverEvidence({ report, evidence } = {}) {
   if (!report || !evidence || evidence.format_version !== 1 || evidence.evidence_type !== 'operator-cutover' || evidence.migration_id !== report.migration_id || evidence.report_sha256 !== report.report_sha256 || evidence.evidence_sha256 !== hashBody(evidence, 'evidence_sha256')) throw refusal('Operator cutover evidence is missing, stale, or not hash-bound to the validation report.');
   const action = evidence.operator_action; const readback = evidence.readback;
@@ -50,13 +52,15 @@ export function validateOperatorCutoverEvidence({ report, evidence } = {}) {
   return true;
 }
 export function determineMigrationStatus(report, { operatorCutoverEvidence, requireReportHash = true } = {}) {
-  if (report?.refusal || report?.violations?.length || !report || requireReportHash && report.report_sha256 !== hashBody(report, 'report_sha256')) return 'refused';
+  if (report?.refusal || report?.violations?.length || !report || requireReportHash && report.report_sha256 !== reportBodyHash(report)) return 'refused';
+  // Evidence that was supplied but does not validate is never quietly set aside: the answer is refused, not a milder state.
+  if (operatorCutoverEvidence !== undefined && operatorCutoverEvidence !== null) { try { validateOperatorCutoverEvidence({ report, evidence: operatorCutoverEvidence }); } catch { return 'refused'; } }
   if (!report?.relational_reconciliation_complete || !report?.dry_run_receipt_complete || !report?.import_receipt_complete) return report?.target_present ? 'review-required' : report?.exported ? 'exported' : 'review-required';
   if (!report?.target_present) return report?.exported ? 'exported' : 'review-required';
   if (!report?.imported) return 'review-required';
   if (!report?.images_complete) return 'data-imported-images-pending';
   if (!report?.reembed_complete) return 'data-imported-not-search-ready';
-  if (operatorCutoverEvidence) { try { validateOperatorCutoverEvidence({ report, evidence: operatorCutoverEvidence }); return 'complete-after-operator-cutover-evidence'; } catch { return 'ready-for-cutover'; } }
+  if (operatorCutoverEvidence !== undefined && operatorCutoverEvidence !== null) return 'complete-after-operator-cutover-evidence';
   return 'ready-for-cutover';
 }
 export function reconcileMigration({ source, exported, staged, target, decisions = [], losses = [], imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt, trustedPublicKey, dryRunAccepted, imported, migrationId = source?.migration_id ?? imagePlan?.migration_id ?? reembedPlan?.migration_id } = {}) {

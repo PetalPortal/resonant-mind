@@ -1,0 +1,101 @@
+{
+  "description": "CHECK constraints of the released v4 schema, as pg_get_expr prints them with the validator session settings (generated on PostgreSQL 18.6). Derived by spec/v4-checks.mjs; validate evaluates only these.",
+  "migration_set_sha256": "40e5b56c474312d5f6d273008655ea2429b47baa97366691e7ff69443df00599",
+  "checks": [
+    {
+      "table": "compass",
+      "name": "compass_kind_check",
+      "expression": "(kind = ANY (ARRAY['value'::text, 'belief'::text, 'ideology'::text, 'boundary'::text, 'commitment'::text]))"
+    },
+    {
+      "table": "compass_provenance",
+      "name": "compass_provenance_source_type_check",
+      "expression": "(source_type = ANY (ARRAY['observation'::text, 'journal'::text, 'image'::text, 'thread'::text]))"
+    },
+    {
+      "table": "consolidation_groups",
+      "name": "cgroups_subject_check",
+      "expression": "(NOT ((person_id IS NOT NULL) AND (node_id IS NOT NULL)))"
+    },
+    {
+      "table": "entities",
+      "name": "entities_entity_type_check",
+      "expression": "(entity_type = ANY (ARRAY['concept'::text, 'project'::text, 'infrastructure'::text, 'artifact'::text, 'moment'::text, 'session_log'::text, 'practice'::text, 'research'::text, 'journal'::text, 'community'::text, 'emotional_pattern'::text, 'relationship'::text, 'self'::text, 'place'::text, 'object'::text, 'peer_ai'::text, 'person'::text]))"
+    },
+    {
+      "table": "images",
+      "name": "images_subject_check",
+      "expression": "(NOT ((person_id IS NOT NULL) AND (node_id IS NOT NULL)))"
+    },
+    {
+      "table": "inner_entries",
+      "name": "inner_entries_kind_check",
+      "expression": "(kind = ANY (ARRAY['quiet_want'::text, 'small_joy'::text]))"
+    },
+    {
+      "table": "nodes",
+      "name": "nodes_kind_check",
+      "expression": "(kind = ANY (ARRAY['concept'::text, 'project'::text, 'infrastructure'::text, 'artifact'::text, 'moment'::text, 'session_log'::text, 'practice'::text, 'research'::text, 'journal'::text, 'community'::text, 'emotional_pattern'::text, 'relationship'::text, 'self'::text, 'place'::text, 'object'::text]))"
+    },
+    {
+      "table": "observations",
+      "name": "observations_certainty_check",
+      "expression": "(certainty = ANY (ARRAY['believed'::text, 'known'::text, 'tentative'::text]))"
+    },
+    {
+      "table": "observations",
+      "name": "observations_charge_check",
+      "expression": "(charge = ANY (ARRAY['fresh'::text, 'active'::text, 'processing'::text, 'metabolized'::text]))"
+    },
+    {
+      "table": "observations",
+      "name": "observations_context_check",
+      "expression": "((context IS NULL) OR (context = ANY (ARRAY['default'::text, 'emotional-processing'::text, 'interests-curiosities'::text, 'creative-space'::text, 'relational-models'::text, 'episodic'::text, 'values-ethics'::text, 'research'::text])))"
+    },
+    {
+      "table": "observations",
+      "name": "observations_salience_check",
+      "expression": "(salience = ANY (ARRAY['active'::text, 'high'::text, 'background'::text, 'foundational'::text, 'medium'::text, 'heavy'::text]))"
+    },
+    {
+      "table": "observations",
+      "name": "observations_source_check",
+      "expression": "(source = ANY (ARRAY['conversation'::text, 'realization'::text, 'external'::text, 'consolidated'::text, 'inferred'::text, 'journal'::text]))"
+    },
+    {
+      "table": "observations",
+      "name": "observations_subject_check",
+      "expression": "((person_id IS NULL) <> (node_id IS NULL))"
+    },
+    {
+      "table": "observations",
+      "name": "observations_weight_check",
+      "expression": "(weight = ANY (ARRAY['light'::text, 'medium'::text, 'heavy'::text]))"
+    },
+    {
+      "table": "people",
+      "name": "people_kind_check",
+      "expression": "(kind = ANY (ARRAY['self'::text, 'person'::text, 'peer_ai'::text]))"
+    },
+    {
+      "table": "relational_state",
+      "name": "relational_state_intensity_check",
+      "expression": "(intensity = ANY (ARRAY['whisper'::text, 'present'::text, 'strong'::text, 'overwhelming'::text]))"
+    },
+    {
+      "table": "threads",
+      "name": "threads_priority_check",
+      "expression": "(priority = ANY (ARRAY['low'::text, 'medium'::text, 'high'::text, 'urgent'::text, 'critical'::text]))"
+    },
+    {
+      "table": "threads",
+      "name": "threads_status_check",
+      "expression": "(status = ANY (ARRAY['active'::text, 'resolved'::text]))"
+    },
+    {
+      "table": "threads",
+      "name": "threads_thread_type_check",
+      "expression": "(thread_type = ANY (ARRAY['intention'::text, 'task'::text, 'handoff'::text, 'explore'::text, 'idea'::text, 'project'::text, 'creative'::text, 'relational'::text]))"
+    }
+  ]
+}

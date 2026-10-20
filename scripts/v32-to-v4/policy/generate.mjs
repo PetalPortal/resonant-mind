@@ -4,6 +4,8 @@ import { canonicalSha256, sha256Hex } from '../lib/hash.mjs';
 import { FORMAT_VERSION } from '../lib/contracts.mjs';
 import { MigrationRefusal } from '../lib/refusal.mjs';
 import { verifyBundle, readBundleMember } from '../lib/bundle.mjs';
+import { numbersSurviveParsing } from '../lib/lossless-json.mjs';
+import { parseInstantMicros } from '../lib/instant.mjs';
 
 const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3,})?(?:Z|[+-]\d{2}:\d{2})$/u;
 const SQLITE_UTC = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/u;
@@ -79,13 +81,15 @@ function safeId(value) {
   if (value === null || value === undefined) return null;
   return typeof value === 'string' || typeof value === 'number' ? value : canonicalJson(value).trim();
 }
-function itemId(type, table, id, rowHash) {
-  return sha256Hex(canonicalJson({ type, source_table: table, source_id: safeId(id), source_row_sha256: rowHash }).trim());
+// A decision is one question about one cell: the identity is the kind of question, the row, and the column.
+// Two broken references on one row are two decisions, and a reviewer's answer to one never answers the other.
+function itemId(type, table, id, rowHash, field) {
+  return sha256Hex(canonicalJson({ type, source_table: table, source_id: safeId(id), source_row_sha256: rowHash, field: field ?? null }).trim());
 }
 function makeItem(type, table, row, index, reason, allowedChoices, extra = {}) {
   const rowHash = canonicalSha256(row);
   return {
-    decision_id: itemId(type, table, sourceId(table, row, index), rowHash),
+    decision_id: itemId(type, table, sourceId(table, row, index), rowHash, extra.field),
     type,
     source_table: table,
     source_id: safeId(sourceId(table, row, index)),
@@ -98,22 +102,21 @@ function makeItem(type, table, row, index, reason, allowedChoices, extra = {}) {
 function add(items, seen, item) {
   if (!seen.has(item.decision_id)) { seen.add(item.decision_id); items.push(item); }
 }
+const NAIVE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?$/u;
+const INVALID_TIMESTAMP = 'timestamp is invalid';
 function timestampAmbiguity(value) {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value !== 'string') return 'timestamp is not text';
-  if (ISO_WITH_OFFSET.test(value)) {
-    const date = new Date(value);
-    if (!Number.isNaN(date.valueOf()) && date.toISOString() !== undefined) return null;
-  }
-  if (SQLITE_UTC.test(value)) {
-    const date = new Date(`${value.replace(' ', 'T')}Z`);
-    if (!Number.isNaN(date.valueOf())) return null;
-  }
+  // A value in a supported form must be a real calendar instant (2026-02-30 and T24:00:00 are not); the
+  // exact reader says so, and no reviewed timezone can repair one.
+  if (ISO_WITH_OFFSET.test(value) || SQLITE_UTC.test(value)) { try { parseInstantMicros(value, { naiveOffset: 'UTC' }); return null; } catch { return INVALID_TIMESTAMP; } }
+  if (NAIVE_TIMESTAMP.test(value)) { try { parseInstantMicros(value, { naiveOffset: 'UTC' }); } catch { return INVALID_TIMESTAMP; } return 'timestamp is naive and has no timezone offset'; }
   if (/^\d{1,13}$/u.test(value) || typeof value === 'number') return 'epoch-like timestamp requires an explicit unit and timezone';
   if (!/[T ]/u.test(value)) return 'timestamp is not a supported timestamp form';
   if (!/[zZ]|[+-]\d{2}:?\d{2}$/u.test(value)) return 'timestamp is naive and has no timezone offset';
-  return 'timestamp is invalid';
+  return INVALID_TIMESTAMP;
 }
+export { INVALID_TIMESTAMP };
 function dateAmbiguity(value) {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/u.test(value)) { const date = new Date(`${value}T00:00:00.000Z`); if (!Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value) return null; }
@@ -121,7 +124,7 @@ function dateAmbiguity(value) {
 }
 function shapeOk(value, shape) {
   let parsed = value;
-  if (typeof value === 'string') { try { parsed = JSON.parse(value); } catch { return false; } }
+  if (typeof value === 'string') { try { parsed = JSON.parse(value); } catch { return false; } if (!numbersSurviveParsing(value)) return false; }
   if (shape === 'array') return Array.isArray(parsed);
   if (shape === 'integer-array') return Array.isArray(parsed) && parsed.every((item) => Number.isSafeInteger(typeof item === 'number' ? item : Number(item)));
   if (shape === 'object') return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed);
@@ -175,10 +178,10 @@ export function generateDecisionItems(bundle) {
       }
       if (TIMESTAMP_FIELDS.has(`${table}.${field}`) && value !== null && value !== undefined) {
         const reason = timestampAmbiguity(value);
-        if (reason) add(items, seen, makeItem('timestamp', table, row, index, reason, ['normalize-utc', 'exclude-row'], { field, observed_value_sha256: sha256Hex(String(value)) }));
+        if (reason) add(items, seen, makeItem('timestamp', table, row, index, reason, reason === INVALID_TIMESTAMP ? ['exclude-row'] : ['normalize-utc', 'exclude-row'], { field, observed_value_sha256: sha256Hex(String(value)) }));
       }
       const shape = JSON_SHAPES.get(field);
-      if (shape && value !== null && value !== undefined && !shapeOk(value, shape)) add(items, seen, makeItem('malformed-json', table, row, index, `JSON field does not match the expected ${shape} shape`, ['map-json', 'exclude-row'], { field, expected_shape: shape, observed_value_sha256: sha256Hex(String(value)) }));
+      if (shape && value !== null && value !== undefined && !shapeOk(value, shape)) add(items, seen, makeItem('malformed-json', table, row, index, `JSON field does not match the expected ${shape} shape, or holds a number that JavaScript cannot carry exactly`, ['map-json', 'exclude-row'], { field, expected_shape: shape, observed_value_sha256: sha256Hex(String(value)) }));
       if ((field === 'context' || field === 'scope' || field === 'primary_context') && value !== null && value !== undefined && !KNOWN_CONTEXTS.has(String(value).toLowerCase())) add(items, seen, itemForUnknown(table, row, index, field, value, 'context/scope value is not a known deterministic value', ['map-context', 'exclude-row']));
       if (['status', 'salience', 'certainty', 'weight', 'charge', 'source', 'thread_type', 'priority', 'intensity'].includes(field) && value !== null && value !== undefined) {
         const allowed = TARGET_ENUM_ALIASES.get(`${table}.${field}`);
@@ -259,8 +262,31 @@ export function loadVerifiedBundle(path, options = {}) {
   return { tables, migration_id: verified.manifest.migration_id, bundle_manifest_sha256: envelope.manifest_sha256, manifest: verified.manifest };
 }
 
+/**
+ * The reviewed choice for one generated item. A choice binds to the item's decision id, which is a hash of
+ * the kind of question, the row and the column; nothing else matches. More than one entry with the id, or an
+ * entry whose own type, table, row or column contradicts the item it carries the id of, is a refusal: this
+ * function never picks the first of several.
+ */
 export function choiceForItem(decisions, item) {
-  const items = decisions?.items ?? decisions?.decisions ?? [];
-  return items.find((candidate) => candidate.decision_id === item.decision_id || (candidate.source_row_sha256 === item.source_row_sha256 && candidate.type === item.type))?.choice;
+  const entries = decisions?.items ?? decisions?.decisions ?? [];
+  const matching = entries.filter((candidate) => candidate?.decision_id === item.decision_id);
+  if (matching.length === 0) return undefined;
+  const refuseBinding = (summary) => { throw new MigrationRefusal({ code: 'RMIG-E-POLICY-MISMATCH', phase: 'compile-policy', summary, safe_details: { decision_id: item.decision_id }, report_path: null }); };
+  if (matching.length > 1) refuseBinding('More than one reviewed entry answers the same decision; a choice must bind to exactly one item.');
+  const [entry] = matching;
+  for (const key of ['type', 'source_table', 'source_row_sha256']) if (entry[key] !== item[key]) refuseBinding(`A reviewed entry carries a decision id but names a different ${key}; it is not the answer to this item.`);
+  if ((entry.field ?? null) !== (item.field ?? null)) refuseBinding('A reviewed entry carries a decision id but names a different field; it is not the answer to this item.');
+  return entry.choice;
+}
+/**
+ * The reviewed decision item that answers one cell (table, row, kind of question, column), or undefined.
+ * Used by the value map and by validate's column comparison, which look an item up by what the cell is
+ * rather than by a generated item. Exactly one item may answer a cell; two is a refusal.
+ */
+export function decisionItemForCell(decisions, { table, rowHash, type, field }) {
+  const matching = (decisions?.items ?? decisions?.decisions ?? []).filter((item) => item?.source_table === table && item.source_row_sha256 === rowHash && item.type === type && (item.field ?? null) === (field ?? null));
+  if (matching.length > 1) throw new MigrationRefusal({ code: 'RMIG-E-POLICY-MISMATCH', phase: 'compile-policy', summary: 'More than one reviewed entry answers the same cell; a choice must bind to exactly one item.', safe_details: { source_table: table, field: field ?? null }, report_path: null });
+  return matching[0];
 }
 export { HASH, ISO_WITH_OFFSET, SQLITE_UTC, KIND_NORMALIZATIONS };

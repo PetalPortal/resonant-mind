@@ -13,6 +13,7 @@ import { MigrationRefusal } from '../lib/refusal.mjs';
 import { SOURCE_SESSION_SETTINGS } from '../source/postgres-v32.mjs';
 import { SERIAL_TABLES, ledgerBinding, readIdentityInTransaction } from '../target/postgres.mjs';
 import { COMPARED_TARGET_TABLES } from './compare.mjs';
+import { CHECKS_QUERY, classifyChecks, loadExpectedChecks } from '../spec/v4-checks.mjs';
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const quote = (name) => {
@@ -81,11 +82,16 @@ export async function readLiveTarget({ client, migrationId, findings }) {
       if (duplicates > 0) findings.add('unique-duplicates', { table: unique.table_name, index: unique.name, groups: duplicates });
     }
 
-    // CHECK constraints: each expression is evaluated against every stored row (a CHECK passes on TRUE or NULL).
-    // The expression is the database's own text for its own constraint, run inside a read-only transaction.
-    const checks = (await client.query("SELECT c.conname::text AS name, rel.relname::text AS table_name, pg_catalog.pg_get_expr(c.conbin, c.conrelid) AS expression FROM pg_catalog.pg_constraint c JOIN pg_catalog.pg_class rel ON rel.oid = c.conrelid JOIN pg_catalog.pg_namespace n ON n.oid = rel.relnamespace WHERE n.nspname = 'public' AND c.contype = 'c' ORDER BY rel.relname, c.conname")).rows;
+    // CHECK constraints: each released constraint's expression is evaluated against every stored row (a CHECK
+    // passes on TRUE or NULL). The expression is text from the target's catalog, so it is only evaluated when it
+    // is exactly the released v4 schema's own (spec/v4-checks.json); any other CHECK is a finding and is never
+    // run, because running it would execute whatever the target's catalog says with the validator's rights.
+    const catalogChecks = (await client.query(CHECKS_QUERY)).rows;
+    const classified = classifyChecks(catalogChecks, loadExpectedChecks().checks);
+    for (const item of classified.unexpected) findings.add('check-constraint-unexpected', item);
+    for (const item of classified.missing) findings.add('check-constraint-missing', item);
     let checksChecked = 0;
-    for (const check of checks) {
+    for (const check of classified.evaluate) {
       const violations = Number((await client.query(`SELECT count(*)::text AS n FROM public.${quote(check.table_name)} WHERE (${check.expression}) IS FALSE`)).rows[0].n);
       checksChecked += 1;
       if (violations > 0) findings.add('check-violations', { table: check.table_name, constraint: check.name, rows: violations });
@@ -123,7 +129,7 @@ export async function readLiveTarget({ client, migrationId, findings }) {
       ledger,
       tables,
       columnTypes,
-      checks: { constraints: constraints.length, foreign_keys: foreignKeysChecked, unique_indexes: uniquesChecked, check_constraints: checksChecked, indexes: indexes.length, sequences },
+      checks: { constraints: constraints.length, foreign_keys: foreignKeysChecked, unique_indexes: uniquesChecked, check_constraints: checksChecked, check_constraints_unexpected: classified.unexpected.length, indexes: indexes.length, sequences },
     };
   } finally {
     try { await client.query('ROLLBACK'); } catch { /* the read result or the refusal matters more */ }

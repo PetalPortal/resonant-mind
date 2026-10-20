@@ -1,17 +1,19 @@
-import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
+import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import pg from 'pg';
 import { parseEnvReference } from '../source/postgres-v32.mjs';
 import { createV4MigrationRunner } from '../../migrate-postgres.mjs';
 import { MigrationRefusal } from '../lib/refusal.mjs';
 import { canonicalJson } from '../lib/canonical-json.mjs';
+import { readArtifact } from './artifacts.mjs';
+import { publishNew, writeJsonNew } from './shared.mjs';
 import { buildDryRunReport, dryRunStaging, importPlan, inspectTarget, prepareTarget, readTargetIdentity } from '../target/postgres.mjs';
 
 const { Client } = pg;
 
 function refuse(summary) { return new MigrationRefusal({ code: 'RMIG-E-SOURCE-ARG', phase: 'runtime', summary, safe_details: {}, report_path: null }); }
 function flags(argv) {
-  const allowed = new Set(['--target', '--source', '--source-kind', '--migration-id', '--bundle-manifest-sha256', '--compiled-policy-sha256', '--resume-schema', '--staging-schema', '--plan', '--dry-run', '--receipt-out']);
+  const allowed = new Set(['--target', '--source', '--source-kind', '--migration-id', '--bundle-manifest-sha256', '--compiled-policy-sha256', '--resume-schema', '--staging-schema', '--plan', '--dry-run', '--receipt-out', '--passphrase-file']);
   const out = Object.create(null);
   for (let i = 0; i < argv.length; i += 1) {
     const key = argv[i];
@@ -67,10 +69,17 @@ function reserveOutput(path) {
   closeSync(openSync(temporary, 'wx', 0o600));
   return {
     release() { try { unlinkSync(temporary); } catch { /* nothing to release */ } },
-    commit(value) { writeFileSync(temporary, canonicalJson(value), { mode: 0o600 }); renameSync(temporary, path); },
+    commit(value) {
+      writeFileSync(temporary, canonicalJson(value), { mode: 0o600 });
+      try { publishNew('import', temporary, path); } catch (error) {
+        // the import has committed: the receipt must survive even if the chosen path was taken in the meantime
+        const saved = `${path}.receipt-${process.pid}`;
+        try { writeFileSync(saved, canonicalJson(value), { mode: 0o600, flag: 'wx' }); } catch { /* the receipt is also recorded in the target */ }
+        throw error;
+      }
+    },
   };
 }
-function writeJson(path, value) { mkdirSync(dirname(path), { recursive: true }); const temp = `${path}.tmp-${process.pid}`; writeFileSync(temp, canonicalJson(value), { mode: 0o600 }); renameSync(temp, path); }
 function requireValue(values, key) { if (typeof values[key] !== 'string') throw refuse(`Target command requires ${key}.`); return values[key]; }
 
 export function parseTargetCommandArgs(command, argv) {
@@ -96,19 +105,19 @@ export async function targetCommand(command, argv) {
     const source = await sourceIdentity(parsed.source, parsed.sourceKind);
     const runner = createV4MigrationRunner({ connectionString: config.connectionString, ssl: config.ssl });
     try {
-      return { command, ...(await prepareTarget({ client, migrationRunner: runner, sourceIdentity: source, migrationId: parsed.migrationId, bundleManifestSha256: parsed.bundleManifestSha256, compiledPolicySha256: parsed.compiledPolicySha256, resumeSchema: parsed.resumeSchema, plan: parsed.plan === undefined ? undefined : loadJson(parsed.plan, 'The relational staging plan') })) };
+      return { command, ...(await prepareTarget({ client, migrationRunner: runner, sourceIdentity: source, migrationId: parsed.migrationId, bundleManifestSha256: parsed.bundleManifestSha256, compiledPolicySha256: parsed.compiledPolicySha256, resumeSchema: parsed.resumeSchema, plan: parsed.plan === undefined ? undefined : readArtifact(command, parsed.plan, 'The relational staging plan', { kind: 'relational-plan', passphraseFile: parsed.passphraseFile }) })) };
     } finally { await runner.close().catch(() => {}); }
   });
   if (command === 'dry-run') return withTarget(parsed.target, async (client) => {
-    const plan = loadJson(parsed.plan, 'The relational staging plan');
+    const plan = readArtifact(command, parsed.plan, 'The relational staging plan', { kind: 'relational-plan', passphraseFile: parsed.passphraseFile });
     const target = await readTargetIdentity({ client });
     if (existsSync(parsed.receiptOut)) throw refuse('The receipt output already exists; a receipt is never overwritten. Choose a new path.');
     const report = await dryRunStaging({ client, plan, stagingSchema: parsed.stagingSchema, targetIdentity: target });
-    writeJson(parsed.receiptOut, report);
+    writeJsonNew('dry-run', parsed.receiptOut, report);
     return { command, receipt_sha256: report.receipt_sha256, report_path: parsed.receiptOut };
   });
   if (command === 'import') return withTarget(parsed.target, async (client) => {
-    const plan = loadJson(parsed.plan, 'The relational staging plan');
+    const plan = readArtifact(command, parsed.plan, 'The relational staging plan', { kind: 'relational-plan', passphraseFile: parsed.passphraseFile });
     const dryRun = loadJson(parsed.dryRun, 'The dry-run receipt');
     const target = await readTargetIdentity({ client });
     // The import commits exactly once. Make sure the receipt can be written before it does, so that a

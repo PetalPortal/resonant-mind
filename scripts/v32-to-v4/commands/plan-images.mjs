@@ -1,13 +1,38 @@
-import { readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
-import { dirname } from 'node:path';
-import { buildImageInventory } from '../external/images.mjs';
+import { buildImageInventory, planHash } from '../external/images.mjs';
 import { buildFilesystemInventory } from '../external/filesystem-store.mjs';
-import { canonicalJson } from '../lib/canonical-json.mjs';
-import { MigrationRefusal } from '../lib/refusal.mjs';
-function refuse(summary) { return new MigrationRefusal({ code: 'RMIG-E-SOURCE-ARG', phase: 'plan-images', summary, safe_details: {}, report_path: null }); }
-function parse(argv) { const out = {}; for (let i = 0; i < argv.length; i += 1) { const key = argv[i]; if (!['--input', '--source', '--out', '--migration-id', '--bundle-manifest-sha256', '--compiled-policy-sha256'].includes(key)) throw refuse('plan-images accepts only documented options.'); const value = argv[++i]; if (!value || value.startsWith('--') || out[key] !== undefined) throw refuse(`plan-images requires one value for ${key}.`); out[key] = value; } if (!out['--input'] && !out['--source']) throw refuse('plan-images requires --input or --source.'); if (!out['--out']) throw refuse('plan-images requires --out.'); return out; }
-function json(path) { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { throw refuse('Image inventory input is missing or invalid JSON.'); } }
-function write(path, value) { mkdirSync(dirname(path), { recursive: true }); const tmp = `${path}.tmp-${process.pid}`; writeFileSync(tmp, canonicalJson(value), { mode: 0o600 }); renameSync(tmp, path); }
-export async function planImagesCommand(args) { const input = args.input ? json(args.input) : { images: await buildFilesystemInventory(args.source) }; const plan = buildImageInventory({ ...input, migrationId: args.migrationId, bundleManifestSha256: args.bundleManifestSha256, compiledPolicySha256: args.compiledPolicySha256 }); write(args.out, plan); return plan; }
-export function parsePlanImagesArgs(argv) { const values = parse(argv); return Object.fromEntries(Object.entries(values).map(([key, value]) => [key.slice(2).replace(/-([a-z])/gu, (_m, c) => c.toUpperCase()), value])); }
+import { readArtifact } from './artifacts.mjs';
+import { parseOptions, readJsonFile, refuseArgument, writeJsonNew } from './shared.mjs';
+
+const PHASE = 'plan-images';
+
+export function parsePlanImagesArgs(argv) {
+  const values = parseOptions(PHASE, argv, { required: ['--out'], optional: ['--plan', '--input', '--source', '--migration-id', '--bundle-manifest-sha256', '--compiled-policy-sha256', '--passphrase-file'] });
+  const sources = ['--plan', '--input', '--source'].filter((key) => values[key] !== undefined);
+  if (sources.length !== 1) throw refuseArgument(PHASE, 'plan-images requires exactly one of --plan, --input or --source.');
+  if (values['--plan'] !== undefined) {
+    if (['--migration-id', '--bundle-manifest-sha256', '--compiled-policy-sha256'].some((key) => values[key] !== undefined)) throw refuseArgument(PHASE, 'plan-images --plan takes the migration id and the bindings from the relational plan; do not pass them.');
+  } else if (values['--passphrase-file'] !== undefined) throw refuseArgument(PHASE, '--passphrase-file applies only to --plan, which may be encrypted.');
+  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key.slice(2).replace(/-([a-z])/gu, (_m, c) => c.toUpperCase()), value]));
+}
+
+/**
+ * The image plan. For a migration, take it from the relational plan (--plan): the image inventory in that
+ * plan is the one derived from the imported image rows, and the one validate holds any image evidence to.
+ * --input and --source build a standalone inventory (from a file of image rows, or from a directory); such
+ * a plan is not bound to the imported rows and validate will not accept it as evidence for a migration.
+ */
+export async function planImagesCommand(args) {
+  let plan;
+  if (args.plan) {
+    const relational = readArtifact(PHASE, args.plan, 'The relational staging plan', { kind: 'relational-plan', passphraseFile: args.passphraseFile });
+    const inventory = relational?.image_inventory;
+    if (relational?.plan_type !== 'relational-staging' || inventory?.plan_type !== 'image-inventory' || typeof inventory.plan_sha256 !== 'string' || planHash(inventory) !== inventory.plan_sha256) throw refuseArgument(PHASE, 'The file is not a relational staging plan with an intact image inventory.');
+    plan = inventory;
+  } else {
+    const input = args.input ? readJsonFile(PHASE, args.input, 'The image inventory input') : { images: await buildFilesystemInventory(args.source) };
+    plan = buildImageInventory({ ...input, migrationId: args.migrationId, bundleManifestSha256: args.bundleManifestSha256, compiledPolicySha256: args.compiledPolicySha256 });
+  }
+  writeJsonNew(PHASE, args.out, plan);
+  return plan;
+}
 export function humanPlanImagesResult(result) { return `plan-images: entries=${result.entries.length}; plan_sha256=${result.plan_sha256}\n`; }

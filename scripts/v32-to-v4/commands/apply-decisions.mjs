@@ -25,6 +25,7 @@ export function applyDecisionsCommand({ bundlePath, decisionsPath, reviewedBy, o
   if (edited === null || typeof edited !== 'object' || Array.isArray(edited) || !Array.isArray(edited.items)) throw refuseArgument(PHASE, 'The decision file is not a decision manifest (it has no items list).');
   const bundle = loadVerifiedBundle(bundlePath, { passphraseFile });
   const hash = bundle.bundle_manifest_sha256;
+  if (edited.migration_id !== bundle.migration_id) throw refusal('RMIG-E-POLICY-MISMATCH', 'The decision file belongs to a different migration than the bundle supplied.', { bundle_manifest_sha256: hash });
   if (edited.bundle_manifest_sha256 !== hash) throw refusal('RMIG-E-POLICY-MISMATCH', 'The decision file was drafted for a different bundle than the one supplied.', { bundle_manifest_sha256: hash });
   const expected = generateDecisionItems(bundle);
   const chosen = new Set(edited.items.filter((item) => item && typeof item === 'object' && Object.hasOwn(item, 'choice')).map((item) => item.decision_id));

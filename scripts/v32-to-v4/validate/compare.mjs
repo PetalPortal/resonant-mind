@@ -16,8 +16,9 @@ import { readFileSync } from 'node:fs';
 import { canonicalJson } from '../lib/canonical-json.mjs';
 import { canonicalSha256 } from '../lib/hash.mjs';
 import { parseInstantMicros } from '../lib/instant.mjs';
+import { sameJsonLossless } from '../lib/lossless-json.mjs';
 import { sourceKey } from '../transform/id-map.mjs';
-import { KIND_NORMALIZATIONS, SQLITE_UTC, DATE_FIELDS, TIMESTAMP_FIELDS } from '../policy/generate.mjs';
+import { KIND_NORMALIZATIONS, SQLITE_UTC, DATE_FIELDS, TIMESTAMP_FIELDS, decisionItemForCell } from '../policy/generate.mjs';
 import { ALIASES, CONTEXTS, ENUMS, ENUM_FIELDS } from '../transform/value-map.mjs';
 import { TARGET_SCHEMAS } from '../transform/target-schema.mjs';
 
@@ -46,7 +47,7 @@ function lookup(table, id) { return sourceKey(table, id); }
 function safeId(value) { return Number.isSafeInteger(value) ? { source_id: value } : { key_sha256: canonicalSha256(String(value)) }; }
 function choiceAction(choice) { return typeof choice === 'string' ? choice : choice?.action ?? choice?.type ?? choice?.kind ?? choice?.choice; }
 function reviewedChoice(decisions, table, rowHash, type, field) {
-  return (decisions?.items ?? []).find((item) => item.source_table === table && item.source_row_sha256 === rowHash && item.type === type && (!item.field || item.field === field))?.choice;
+  return decisionItemForCell(decisions, { table, rowHash, type, field })?.choice;
 }
 
 /**
@@ -64,27 +65,60 @@ function sourceInstant(value, { decisions, table, field, rowHash }) {
   }
 }
 
-function sameJson(left, right) {
-  try { return canonicalJson(typeof left === 'string' ? JSON.parse(left) : left) === canonicalJson(typeof right === 'string' ? JSON.parse(right) : right); } catch { return false; }
+// JSON is compared digit for digit (lib/lossless-json.mjs): a number JSON.parse would round is a difference.
+export function sameJson(left, right) { return sameJsonLossless(left, right); }
+
+/**
+ * What the v4 vocabulary and the reviewed decisions allow an enum value to become. A value may differ from
+ * the source (case folded, an alias, a reviewed mapping) only if the compiled policy recorded that exact
+ * value for this exact cell; a difference nobody recorded is not sanctioned, however plausible it looks.
+ */
+function expectedEnum(column, value, { decisions, table, rowHash, recorded }) {
+  const text = lower(value);
+  const sanctioned = (candidate) => (candidate.how === null || recorded === candidate.value ? candidate : null);
+  if (ENUMS[column]?.has(text)) return sanctioned({ value: text, how: text === value ? null : 'enum-case-folded' });
+  if (ALIASES[column]?.[text] !== undefined) return sanctioned({ value: ALIASES[column][text], how: 'enum-alias' });
+  const choice = reviewedChoice(decisions, table, rowHash, 'unknown-value', column);
+  const mapped = choice?.value ?? choice?.mapped_value ?? choice?.target;
+  if (['map', 'map-status', 'map-context'].includes(choiceAction(choice)) && typeof mapped === 'string') return sanctioned({ value: mapped, how: 'enum-reviewed-map' });
+  return null;
+}
+function expectedContext(value, { decisions, table, rowHash, column, recorded }) {
+  const text = lower(value);
+  const sanctioned = (candidate) => (candidate.how === null || recorded === candidate.value ? candidate : null);
+  if (CONTEXTS.has(text)) return sanctioned({ value: text, how: text === value ? null : 'context-case-folded' });
+  const choice = reviewedChoice(decisions, table, rowHash, 'unknown-value', column);
+  const mapped = choice?.value ?? choice?.mapped_value ?? choice?.target;
+  if (choiceAction(choice) === 'map-context' && typeof mapped === 'string') return sanctioned({ value: lower(mapped), how: 'context-reviewed-map' });
+  return null;
 }
 
-/** What the reviewed policy and the v4 vocabulary allow an enum value to become. */
-function expectedEnum(column, value, { decisions, table, rowHash }) {
-  const text = lower(value);
-  if (ENUMS[column]?.has(text)) return { value: text, how: text === value ? null : 'enum-case-folded' };
-  if (ALIASES[column]?.[text] !== undefined) return { value: ALIASES[column][text], how: 'enum-alias' };
-  const choice = reviewedChoice(decisions, table, rowHash, 'unknown-value', column);
-  const mapped = choice?.value ?? choice?.mapped_value ?? choice?.target;
-  if (['map', 'map-status', 'map-context'].includes(choiceAction(choice)) && typeof mapped === 'string') return { value: mapped, how: 'enum-reviewed-map' };
-  return null;
+// What a reviewed merge or rename makes of an entity, worked out here from the source rows and the reviewed
+// decisions alone (the compiled policy's own field values and names are checked against it, not trusted).
+const MERGE_FIELDS = ['name', 'entity_type', 'primary_context', 'salience', 'created_at', 'updated_at'];
+function mergeFieldValue(rule, byId, survivor, field) {
+  if (rule === undefined) return survivor[field];
+  if (rule !== null && typeof rule === 'object' && Object.hasOwn(rule, 'value')) return rule.value;
+  const selected = rule !== null && typeof rule === 'object' ? (rule.source_id ?? rule.choose_source_id ?? rule.id) : rule;
+  return byId.get(String(selected))?.[field];
 }
-function expectedContext(value, { decisions, table, rowHash, column }) {
-  const text = lower(value);
-  if (CONTEXTS.has(text)) return { value: text, how: text === value ? null : 'context-case-folded' };
-  const choice = reviewedChoice(decisions, table, rowHash, 'unknown-value', column);
-  const mapped = choice?.value ?? choice?.mapped_value ?? choice?.target;
-  if (choiceAction(choice) === 'map-context' && typeof mapped === 'string') return { value: lower(mapped), how: 'context-reviewed-map' };
-  return null;
+function reviewedEntityDecisions(decisions, entities) {
+  const byId = new Map(entities.map((row) => [String(row.id), row]));
+  const merges = new Map(); const renames = new Map();
+  for (const item of decisions?.items ?? []) {
+    if (item?.type !== 'duplicate-entity-name') continue;
+    const choice = item.choice;
+    if (choiceAction(choice) === 'merge') {
+      const survivor = byId.get(String(choice.survivor_id));
+      if (!survivor || !Array.isArray(choice.merged_ids) || !choice.field_rules) continue; // compiling the policy refuses these
+      const values = Object.fromEntries(MERGE_FIELDS.map((field) => [field, mergeFieldValue(choice.field_rules[field], byId, survivor, field)]));
+      const kind = String(choice.kind ?? choice.final_kind ?? KIND_NORMALIZATIONS.get(lower(values.entity_type)) ?? '').toLowerCase() || undefined;
+      for (const id of choice.merged_ids) merges.set(String(id), { survivor_id: choice.survivor_id, values, kind });
+    } else if (choiceAction(choice) === 'rename' && choice.names && typeof choice.names === 'object') {
+      for (const [id, name] of Object.entries(choice.names)) renames.set(String(id), name);
+    }
+  }
+  return { merges, renames };
 }
 
 /**
@@ -141,6 +175,26 @@ export function compareSourceToTarget({ sourceTables, targetTables, compiled, de
     }
   }
 
+  const { merges, renames } = reviewedEntityDecisions(decisions, sourceTables.entities ?? []);
+  // The link a reviewed decision gives a reference cell (re-linked to a reviewed id, or set to NULL), read from
+  // the decision itself. The compiled link map must say the same; the cell's expectation follows the decision.
+  const checkedLinks = new Map();
+  const reviewedLink = (table, rowHash, column, types, where) => {
+    const key = `${table}:${rowHash}:${column}`;
+    if (checkedLinks.has(key)) return checkedLinks.get(key);
+    let reviewed = { has: false };
+    for (const type of types) {
+      const item = decisionItemForCell(decisions, { table, rowHash, type, field: column });
+      const action = choiceAction(item?.choice);
+      if (action === 'link-by-reviewed-id') { reviewed = { has: true, value: item.choice.target_id }; break; }
+      if (action === 'null-if-allowed') { reviewed = { has: true, value: null }; break; }
+    }
+    const compiledHas = compiled.link_map !== undefined && compiled.link_map !== null && Object.hasOwn(compiled.link_map, key);
+    if (reviewed.has !== compiledHas || (reviewed.has && canonicalJson(reviewed.value) !== canonicalJson(compiled.link_map[key] ?? null))) findings.add('link-map-differs-from-reviewed-decision', { ...where, column });
+    const result = reviewed.has ? reviewed.value : undefined;
+    checkedLinks.set(key, result);
+    return result;
+  };
   const mappings = MAP.filter((entry) => entry.target_tables.length > 0 && entry.source_families.includes(family) && Array.isArray(sourceTables[entry.source_table]));
   let cells = 0;
 
@@ -155,6 +209,14 @@ export function compareSourceToTarget({ sourceTables, targetTables, compiled, de
       const idEntry = compiled.id_map?.[lookup(sourceTable, id)];
       const where = { table: sourceTable, ...safeId(id) };
       if (excludedRows.has(`${sourceTable}:${rowHash}`) || idEntry?.excluded) { summary.excluded_by_review += 1; continue; }
+      const merge = sourceTable === 'entities' ? merges.get(String(id)) : undefined;
+      const mergedAway = merge !== undefined && String(merge.survivor_id) !== String(id);
+      if (sourceTable === 'entities') {
+        // the compiled policy may only skip a row as merged if the reviewed decisions merge it into a survivor, and the other way round
+        if ((idEntry?.merged === true) !== mergedAway) findings.add(idEntry?.merged === true ? 'merged-row-without-reviewed-merge' : 'reviewed-merge-not-applied', where);
+        if (merge !== undefined && !mergedAway && canonicalJson(Object.fromEntries(MERGE_FIELDS.map((field) => [field, idEntry?.field_values?.[field] ?? null]))) !== canonicalJson(Object.fromEntries(MERGE_FIELDS.map((field) => [field, merge.values[field] ?? null])))) findings.add('merge-values-differ-from-reviewed-rules', where);
+        if (merge === undefined && renames.has(String(id)) && idEntry?.target_name !== renames.get(String(id))) findings.add('entity-name-differs-from-reviewed-decision', where);
+      }
       if (idEntry?.merged) { summary.merged_by_review += 1; continue; }
       const targetTableName = sourceTable === 'entities' ? idEntry?.target_table : mapping.target_tables[0];
       if (!targetTableName || !index[targetTableName]) { findings.add('source-row-has-no-target-table', where); continue; }
@@ -205,7 +267,7 @@ export function compareSourceToTarget({ sourceTables, targetTables, compiled, de
         }
         if (ENUM_FIELDS.has(qualified)) {
           if (sv === null || sv === undefined) { if (tv !== null && tv !== undefined) fail(tc, 'null-became-a-value'); return; }
-          const expected = expectedEnum(sc, sv, { decisions, table: sourceTable, rowHash });
+          const expected = expectedEnum(sc, sv, { decisions, table: sourceTable, rowHash, recorded: compiled.value_map?.enums?.[`${sourceTable}:${rowHash}:${sc}`] });
           if (expected === null || tv !== expected.value) fail(tc, 'enum'); else if (expected.how) bump(expected.how);
           return;
         }
@@ -215,7 +277,7 @@ export function compareSourceToTarget({ sourceTables, targetTables, compiled, de
             if (tv !== null && tv !== undefined) fail(tc, 'null-became-a-value');
             return;
           }
-          const expected = expectedContext(sv, { decisions, table: sourceTable, rowHash, column: sc });
+          const expected = expectedContext(sv, { decisions, table: sourceTable, rowHash, column: sc, recorded: compiled.value_map?.contexts?.[`${sourceTable}:${rowHash}:${sc}`] });
           if (expected === null || tv !== expected.value) fail(tc, 'context'); else if (expected.how) bump(expected.how);
           return;
         }
@@ -250,12 +312,14 @@ export function compareSourceToTarget({ sourceTables, targetTables, compiled, de
         if (reviewedTensionColumns.has(sc)) continue;
         const value = row[sc];
         if (sourceTable === 'entities') {
-          const override = idEntry?.field_values?.[sc];
+          const override = merge !== undefined ? merge.values[sc] : undefined;
+          const reviewedName = merge !== undefined ? merge.values.name : (renames.get(String(id)) ?? idEntry?.target_name ?? value);
           if (sc === 'id') { compareCell(sc, tc, value, { expected: idEntry?.target_id ?? value, kind: 'id' }); continue; }
-          if (sc === 'name') { compareCell(sc, tc, value, { expected: idEntry?.target_name ?? value, kind: 'name', sanction: idEntry?.target_name !== undefined && idEntry.target_name !== value ? 'entity-renamed-or-merged-by-review' : undefined }); continue; }
+          if (sc === 'name') { compareCell(sc, tc, value, { expected: reviewedName, kind: 'name', sanction: reviewedName !== value ? 'entity-renamed-or-merged-by-review' : undefined }); continue; }
           if (sc === 'entity_type') {
             const derived = KIND_NORMALIZATIONS.get(lower(override ?? value)) ?? (() => { const choice = reviewedChoice(decisions, 'entities', rowHash, 'entity-kind', 'entity_type'); return choice?.kind ?? choice?.value; })();
-            if (idEntry?.final_kind !== undefined && !idEntry.merged && idEntry.field_values === undefined && derived !== undefined && derived !== idEntry.final_kind) { findings.add('entity-kind-not-derivable', where); cells += 1; summary.cells_compared += 1; continue; }
+            const expectedKind = merge !== undefined ? merge.kind : derived;
+            if (idEntry?.final_kind !== undefined && expectedKind !== undefined && expectedKind !== idEntry.final_kind) { findings.add('entity-kind-not-derivable', where); cells += 1; summary.cells_compared += 1; continue; }
             compareCell(sc, tc, value, { expected: idEntry?.final_kind, kind: 'entity-kind' });
             continue;
           }
@@ -272,7 +336,7 @@ export function compareSourceToTarget({ sourceTables, targetTables, compiled, de
         }
         if (FK_COLUMNS[sc] !== undefined) {
           let expected;
-          const link = compiled.link_map?.[`${sourceTable}:${rowHash}:${sc}`];
+          const link = reviewedLink(sourceTable, rowHash, sc, ['broken-foreign-key'], where);
           if (link !== undefined) {
             const entry = link === null ? null : compiled.id_map?.[lookup(FK_COLUMNS[sc], link)];
             expected = link === null ? null : (entry?.excluded ? null : entry?.target_id ?? link);
@@ -282,7 +346,7 @@ export function compareSourceToTarget({ sourceTables, targetTables, compiled, de
           continue;
         }
         if (sourceTable === 'relations' && (sc === 'from_entity' || sc === 'to_entity')) {
-          const link = compiled.link_map?.[`relations:${rowHash}:${sc}`];
+          const link = reviewedLink('relations', rowHash, sc, ['broken-name-reference', 'ambiguous-name-reference'], where);
           let expected = value;
           if (link !== undefined) { const entry = compiled.id_map?.[lookup('entities', link)]; expected = entry?.excluded ? null : (entry?.target_name ?? String(value)); }
           else if (value !== null && value !== undefined) { const context = sc === 'from_entity' ? row.from_context : row.to_context; const mapped = compiled.name_map?.[`${context ?? 'default'}:${String(value)}`] ?? compiled.name_map?.[String(value)]; expected = mapped?.target_name ?? String(value); }
@@ -293,7 +357,7 @@ export function compareSourceToTarget({ sourceTables, targetTables, compiled, de
       }
 
       if (ROUTED.has(sourceTable)) {
-        const entityColumn = compiled.link_map?.[`${sourceTable}:${rowHash}:entity_id`];
+        const entityColumn = reviewedLink(sourceTable, rowHash, 'entity_id', ['broken-foreign-key'], where);
         const mappedEntity = entityColumn !== undefined ? entityColumn : (row.entity_id === null || row.entity_id === undefined ? null : (compiled.id_map?.[lookup('entities', row.entity_id)]?.target_id ?? row.entity_id));
         const entry = mappedEntity === null ? undefined : compiled.id_map?.[lookup('entities', mappedEntity)];
         const route = entry && !entry.excluded ? (entry.target_table === 'people' ? { person_id: entry.target_id, node_id: null } : { person_id: null, node_id: entry.target_id }) : { person_id: null, node_id: null };
@@ -344,6 +408,35 @@ export function compareSourceToTarget({ sourceTables, targetTables, compiled, de
 }
 
 /**
+ * Whether one planned cell is what the target holds, by the v4 column type: null when it is, otherwise the
+ * kind of difference. A plan NULL in a column v4's routing trigger fills in must be exactly that default.
+ */
+export function planCellMismatch({ table, column, value, dbValue, columnType, importedAt }) {
+  const type = TARGET_SCHEMAS[table]?.columns?.[column];
+  if (value === null) {
+    const routed = (table === 'people' || table === 'nodes');
+    if (routed && (column === 'created_at' || column === 'updated_at')) {
+      let micros = null; try { micros = parseInstantMicros(dbValue); } catch { micros = null; }
+      return importedAt === null || importedAt === undefined || micros !== importedAt ? 'default-not-import-time' : null;
+    }
+    if (routed && column in NULL_DEFAULTS) return dbValue !== NULL_DEFAULTS[column] ? 'default' : null;
+    return dbValue !== null && dbValue !== undefined ? 'null-became-a-value' : null;
+  }
+  if (type === 'timestamptz') {
+    let expected = null; let actualMicros = null;
+    try { expected = parseInstantMicros(value); actualMicros = typeof dbValue === 'string' ? parseInstantMicros(dbValue) : null; } catch { /* fails below */ }
+    return expected === null || actualMicros !== expected ? 'instant' : null;
+  }
+  if (type === 'integer') return String(value) !== String(dbValue) ? 'integer' : null;
+  if (type === 'double' || type === 'real') return typeof dbValue === 'number' && Object.is(value, dbValue) ? null : 'number';
+  if (type === 'boolean') return value !== dbValue ? 'boolean' : null;
+  if (type === 'integer_array') return !Array.isArray(dbValue) || canonicalJson(value.map(Number)) !== canonicalJson(dbValue.map(Number)) ? 'id-list' : null;
+  if (type === 'date') return value !== dbValue ? 'date' : null;
+  if (type === 'jsonb' || /^jsonb?$/u.test(columnType ?? '')) return sameJson(value, dbValue) ? null : 'json';
+  return value !== dbValue ? 'text' : null;
+}
+
+/**
  * The plan the target was imported from, against the rows the target holds. Every column the plan row
  * states is compared by its v4 column type; a plan NULL in a column v4's routing trigger fills in must be
  * exactly that default. Rows may not be missing, extra or duplicated.
@@ -369,31 +462,10 @@ export function comparePlanToTarget({ plan, targetTables, columnTypes = {}, impo
       const actual = byId.get(key);
       if (!actual) { findings.add('plan-row-missing-in-target', { table, ...safeId(planned.id) }); continue; }
       for (const [column, value] of Object.entries(planned)) {
-        const type = schema.columns[column];
-        const dbValue = actual[column];
         cells += 1; summary.cells_compared += 1;
-        const mismatch = (kind) => findings.add('plan-cell-mismatch', { table, ...safeId(planned.id), column, difference: kind });
         if (value === undefined) continue;
-        if (value === null) {
-          const routed = (table === 'people' || table === 'nodes');
-          if (routed && (column === 'created_at' || column === 'updated_at')) {
-            let micros = null; try { micros = parseInstantMicros(dbValue); } catch { micros = null; }
-            if (importedAt === null || micros !== importedAt) mismatch('default-not-import-time');
-          } else if (routed && column in NULL_DEFAULTS) { if (dbValue !== NULL_DEFAULTS[column]) mismatch('default'); }
-          else if (dbValue !== null && dbValue !== undefined) mismatch('null-became-a-value');
-          continue;
-        }
-        if (type === 'timestamptz') {
-          let expected = null; let actualMicros = null;
-          try { expected = parseInstantMicros(value); actualMicros = typeof dbValue === 'string' ? parseInstantMicros(dbValue) : null; } catch { /* fails below */ }
-          if (expected === null || actualMicros !== expected) mismatch('instant');
-        } else if (type === 'integer') { if (String(value) !== String(dbValue)) mismatch('integer'); }
-        else if (type === 'double' || type === 'real') { if (!(typeof dbValue === 'number' && Object.is(value, dbValue))) mismatch('number'); }
-        else if (type === 'boolean') { if (value !== dbValue) mismatch('boolean'); }
-        else if (type === 'integer_array') { if (!Array.isArray(dbValue) || canonicalJson(value.map(Number)) !== canonicalJson(dbValue.map(Number))) mismatch('id-list'); }
-        else if (type === 'date') { if (value !== dbValue) mismatch('date'); }
-        else if (type === 'jsonb' || /^jsonb?$/u.test(columnTypes[table]?.[column] ?? '')) { if (!sameJson(value, dbValue)) mismatch('json'); }
-        else if (value !== dbValue) mismatch('text');
+        const difference = planCellMismatch({ table, column, value, dbValue: actual[column], columnType: columnTypes[table]?.[column], importedAt });
+        if (difference !== null) findings.add('plan-cell-mismatch', { table, ...safeId(planned.id), column, difference });
       }
     }
     for (const [key, row] of byId) if (!seen.has(key)) findings.add('target-row-not-in-plan', { table, ...safeId(row.id) });

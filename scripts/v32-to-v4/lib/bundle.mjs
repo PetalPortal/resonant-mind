@@ -515,7 +515,7 @@ export async function writeNdjsonMember({ path, rows, encrypted = false, migrati
 
 export const writeMember = writeNdjsonMember;
 export const readPassphraseFile = passphraseBytes;
-export { passphraseBytes, aadFor, MAGIC, HEADER_BYTES };
+export { passphraseBytes, deriveKey, aadFor, MAGIC, HEADER_BYTES };
 
 export function readBundleMember({ path, manifest, member, env = process.env, platform = process.platform, passphraseFile } = {}) {
   const bytes = readControlBytes(join(resolve(path), ...member.name.split('/')));

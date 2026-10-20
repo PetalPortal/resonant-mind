@@ -119,7 +119,7 @@ describe('operator migration documentation', () => {
     assertHasEvery(text, [
       '--source-kind', '--source', '--report', '--migration-id', '--bundle',
       '--source-report', '--source-fingerprint', '--passphrase-file',
-      '--allow-plaintext-bundle', '--acknowledge-plaintext-risk', '--decisions', '--out',
+      '--allow-plaintext-bundle', '--allow-plaintext-artifact', '--acknowledge-plaintext-risk', '--decisions', '--out',
       '--reviewed-by', '--compiled-policy',
       '--target', '--bundle-manifest-sha256', '--compiled-policy-sha256',
       '--resume-schema', '--plan', '--staging-schema', '--receipt-out', '--dry-run',

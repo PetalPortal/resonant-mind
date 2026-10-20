@@ -7,13 +7,15 @@ import { redactText } from '../lib/redact.mjs';
 import { compilePolicy } from '../policy/compile.mjs';
 import { loadVerifiedBundle } from '../policy/generate.mjs';
 import { transformRelational } from '../transform/relational.mjs';
-import { buildImageInventory, validateImageReceipt } from '../external/images.mjs';
-import { buildReembedPlan, validateReembedReceipts } from '../external/reembed.mjs';
+import { checkExternalEvidence } from '../validate/external-evidence.mjs';
+import { passphraseBytes } from '../lib/bundle.mjs';
+import { sealReport } from '../lib/report-seal.mjs';
 import { postgresClientConfig } from '../source/postgres-v32.mjs';
 import { IMPORT_ORDER, bindRelationalPlan, buildDryRunReport, stageContentSha256 } from '../target/postgres.mjs';
 import { readV4Migrations, migrationSetSha256 } from '../../migrate-postgres.mjs';
 import { checkVersionOrdering } from '../validate/invariants.mjs';
 import { determineMigrationStatus, successfulReceipt, tableCounts } from '../validate/reconcile.mjs';
+import { readArtifact } from './artifacts.mjs';
 import { Findings, compareSourceToTarget, comparePlanToTarget } from '../validate/compare.mjs';
 import { compareSourceToBundle } from '../validate/live-source.mjs';
 import { readLiveTarget } from '../validate/live-target.mjs';
@@ -42,40 +44,6 @@ function bindings(findings, name, receipt, plan) {
   for (const field of ['migration_id', 'bundle_manifest_sha256', 'compiled_policy_sha256']) if (receipt?.[field] !== plan?.[field]) findings.add('receipt-not-bound-to-plan', { receipt: name, field });
 }
 
-function externalEvidence({ plan, args, files, migrationId, findings }) {
-  const bundleHash = plan.bundle_manifest_sha256;
-  const policyHash = plan.compiled_policy_sha256;
-  const result = { images: { planned: plan.image_inventory.entries.length, evidence_supplied: false, complete: false, receipt_sha256: null }, reembed: { planned: plan.reembed_jobs.jobs.length, evidence_supplied: false, complete: false, receipt_sha256: null } };
-  const supplied = (a, b) => (a === undefined ? 0 : 1) + (b === undefined ? 0 : 1);
-
-  const imageCount = supplied(files.imagePlan, files.imageReceipt);
-  if (imageCount === 0) result.images.complete = result.images.planned === 0;
-  else if (imageCount === 1) findings.add('external-image-evidence-incomplete', { detail: 'both --image-plan and --image-receipt are needed' });
-  else {
-    result.images.evidence_supplied = true;
-    if (files.imagePlan.migration_id !== migrationId || (files.imagePlan.bundle_manifest_sha256 !== undefined && files.imagePlan.bundle_manifest_sha256 !== bundleHash) || (files.imagePlan.compiled_policy_sha256 !== undefined && files.imagePlan.compiled_policy_sha256 !== policyHash)) findings.add('external-image-plan-not-bound', {});
-    try {
-      const checked = validateImageReceipt({ plan: files.imagePlan, receipt: files.imageReceipt, migrationId, trustedPublicKey: files.trustedPublicKey });
-      result.images.complete = true; result.images.receipt_sha256 = checked.receipt_sha256;
-    } catch (error) { findings.add('external-image-receipt-invalid', { code: error instanceof MigrationRefusal ? error.code : 'invalid' }); }
-  }
-
-  const reembedCount = supplied(files.reembedPlan, files.reembedReceipts);
-  if (reembedCount === 0) result.reembed.complete = result.reembed.planned === 0;
-  else if (reembedCount === 1) findings.add('external-reembed-evidence-incomplete', { detail: 'both --reembed-plan and --reembed-receipts are needed' });
-  else {
-    result.reembed.evidence_supplied = true;
-    // The job plan must be the one these imported rows (and these images) produce, not merely a well-formed plan.
-    const expected = buildReembedPlan({ members: plan.members, images: files.imagePlan ?? plan.image_inventory, migrationId, bundleManifestSha256: bundleHash, compiledPolicySha256: policyHash });
-    if (files.reembedPlan.plan_sha256 !== expected.plan_sha256) findings.add('reembed-plan-not-derived-from-imported-rows', {});
-    try {
-      validateReembedReceipts({ plan: files.reembedPlan, receipts: files.reembedReceipts, migrationId });
-      result.reembed.complete = true; result.reembed.receipt_sha256 = canonicalSha256(files.reembedReceipts);
-    } catch (error) { findings.add('external-reembed-receipt-invalid', { code: error instanceof MigrationRefusal ? error.code : 'invalid' }); }
-  }
-  return result;
-}
-
 /**
  * Final validation, against the live systems. It re-reads the source and the target itself and compares
  * what each holds with the verified bundle, the reviewed decisions, the relational plan and the receipts.
@@ -84,7 +52,7 @@ function externalEvidence({ plan, args, files, migrationId, findings }) {
  */
 export async function validateCommand(args) {
   const decisions = readJsonFile(PHASE, args.decisionsPath, 'The reviewed decision manifest');
-  const plan = readJsonFile(PHASE, args.planPath, 'The relational staging plan');
+  const plan = readArtifact(PHASE, args.planPath, 'The relational staging plan', { kind: 'relational-plan', passphraseFile: args.passphraseFile });
   const dryRun = readJsonFile(PHASE, args.dryRunReceiptPath, 'The dry-run receipt');
   const importReceipt = readJsonFile(PHASE, args.importReceiptPath, 'The import receipt');
   const files = {
@@ -105,6 +73,8 @@ export async function validateCommand(args) {
 
   const findings = new Findings();
   const external = new Findings();
+  // the same passphrase file that opens the bundle keys the report's seal; without one the report is unsealed (and says so)
+  const sealKey = args.passphraseFile !== undefined || process.env.RM_MIGRATION_PASSPHRASE_FILE ? passphraseBytes({ phase: PHASE, passphraseFile: args.passphraseFile }) : null;
 
   // 1. The reviewed decisions compile to the policy the plan was built from, and the plan is what that policy produces.
   const compiled = compilePolicy({ bundle, decisions }); // refuses unresolved, stale or invalid decisions
@@ -179,13 +149,13 @@ export async function validateCommand(args) {
   const people = ids('people'); const nodes = ids('nodes'); const entities = ids('entities');
   for (const id of entities) if ((people.has(id) ? 1 : 0) + (nodes.has(id) ? 1 : 0) !== 1) findings.add('entity-not-routed-exactly-once', {});
   for (const id of [...people, ...nodes]) if (!entities.has(id)) findings.add('routed-row-without-entity', {});
-  const plannedImages = new Set(plan.image_inventory.entries.map((entry) => String(entry.linked_target_ids?.image_id)));
+  const plannedImages = new Set(rebuilt.image_inventory.entries.map((entry) => String(entry.linked_target_ids?.image_id)));
   const storedImages = ids('images');
   for (const id of storedImages) if (!plannedImages.has(id)) findings.add('image-row-not-in-inventory', {});
   for (const id of plannedImages) if (!storedImages.has(id)) findings.add('inventoried-image-row-missing', {});
 
   // 7. External work: supplied evidence is validated; none supplied leaves the state pending, never ready.
-  const evidence = externalEvidence({ plan, args, files, migrationId, findings: external });
+  const evidence = checkExternalEvidence({ derived: { members: rebuilt.members, imageInventory: rebuilt.image_inventory, reembedPlan: rebuilt.reembed_jobs }, files, migrationId, live: { tables: live.tables, columnTypes: live.columnTypes, importedAt: live.importedAt }, findings: external });
 
   merge(findings, sourceToTarget.findings);
   merge(findings, planToTarget.findings);
@@ -230,15 +200,15 @@ export async function validateCommand(args) {
   };
   report.status = totalViolations > 0 ? 'refused' : determineMigrationStatus(report, { requireReportHash: false });
   report.report_sha256 = canonicalSha256(report);
+  // The keyed seal lets `status` tell this report from an edited one (see lib/report-seal.mjs). It needs the passphrase file.
+  if (sealKey !== null) { try { report.report_seal = sealReport(report, sealKey); } finally { sealKey.fill(0); } }
   writeJsonNew(PHASE, args.outPath, report);
   if (totalViolations > 0) {
-    // a path the redactor would rewrite (a home directory, for example) cannot ride in a refusal; the report is still at --out
-    const reportPath = redactText(args.outPath) === args.outPath ? args.outPath : null;
-    throw new MigrationRefusal({ code: 'RMIG-E-VALIDATION', phase: PHASE, summary: `Validation found ${totalViolations} finding(s) in ${Object.keys(violationCounts).length} check(s): ${Object.keys(violationCounts).sort().slice(0, 6).join(', ')}.`, safe_details: { checks: violationCounts, report_sha256: report.report_sha256 }, report_path: reportPath });
+    throw new MigrationRefusal({ code: 'RMIG-E-VALIDATION', phase: PHASE, summary: `Validation found ${totalViolations} finding(s) in ${Object.keys(violationCounts).length} check(s): ${Object.keys(violationCounts).sort().slice(0, 6).join(', ')}.`, safe_details: { checks: violationCounts, report_sha256: report.report_sha256 }, report_path: args.outPath });
   }
   return report;
 }
 
 export function humanValidateResult(report) {
-  return `validate: status=${report.status}; report_sha256=${report.report_sha256}; violations=${Object.values(report.violation_counts).reduce((sum, count) => sum + count, 0)}; cells_compared=${report.comparison.source_to_target.cells_compared + report.comparison.plan_to_target.cells_compared}\n`;
+  return `validate: status=${report.status}; report_sha256=${report.report_sha256}; sealed=${report.report_seal !== undefined}; violations=${Object.values(report.violation_counts).reduce((sum, count) => sum + count, 0)}; cells_compared=${report.comparison.source_to_target.cells_compared + report.comparison.plan_to_target.cells_compared}\n`;
 }

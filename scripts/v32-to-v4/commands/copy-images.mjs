@@ -1,13 +1,12 @@
-import { readFileSync, mkdirSync, writeFileSync, renameSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { FilesystemObjectStore, copyImagePlan } from '../external/filesystem-store.mjs';
-import { canonicalJson } from '../lib/canonical-json.mjs';
+import { writeJsonNew } from './shared.mjs';
 import { MigrationRefusal } from '../lib/refusal.mjs';
 import { validateImageReceipt } from '../external/images.mjs';
 function refuse(summary) { return new MigrationRefusal({ code: 'RMIG-E-SOURCE-ARG', phase: 'copy-images', summary, safe_details: {}, report_path: null }); }
 function flags(argv) { const out = {}; for (let i = 0; i < argv.length; i += 1) { const key = argv[i]; if (!['--plan', '--source', '--target', '--adapter', '--external-receipt', '--receipt-out', '--trusted-public-key'].includes(key)) throw refuse('copy-images accepts only documented options.'); const value = argv[++i]; if (!value || value.startsWith('--') || out[key] !== undefined) throw refuse(`copy-images requires one value for ${key}.`); out[key] = value; } if (!out['--plan'] || !out['--adapter'] || !out['--receipt-out']) throw refuse('copy-images requires --plan, --adapter, and --receipt-out.'); return out; }
 function json(path, label) { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { throw refuse(`${label} is missing or invalid JSON.`); } }
-function write(path, value) { mkdirSync(dirname(path), { recursive: true }); const temp = `${path}.tmp-${process.pid}`; writeFileSync(temp, canonicalJson(value), { mode: 0o600 }); renameSync(temp, path); }
+function write(path, value) { writeJsonNew('copy-images', path, value); }
 export async function copyImagesCommand(args) {
   const plan = json(args.plan, 'Image plan');
   if (args.adapter === 'r2') {

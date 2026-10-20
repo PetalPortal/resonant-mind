@@ -19,7 +19,7 @@
     "db:migrate": "node scripts/migrate-postgres.mjs",
     "migrate:v32": "node scripts/v32-to-v4/cli.mjs",
     "verify:v32-fixtures": "node scripts/verify-v32-fixtures.mjs",
-    "test:migration:postgres": "vitest run tests/migration/postgres-source.integration.test.mjs tests/migration/postgres-source-session.integration.test.mjs tests/migration/target-fresh.integration.test.mjs tests/migration/cli-flow.integration.test.mjs tests/migration/postgres-spec.integration.test.mjs tests/migration/cli-postgres.integration.test.mjs tests/migration/e2e-postgres.integration.test.mjs tests/migration/e2e-postgres-rich.integration.test.mjs",
+    "test:migration:postgres": "vitest run tests/migration/postgres-source.integration.test.mjs tests/migration/postgres-source-session.integration.test.mjs tests/migration/target-fresh.integration.test.mjs tests/migration/cli-flow.integration.test.mjs tests/migration/postgres-spec.integration.test.mjs tests/migration/cli-postgres.integration.test.mjs tests/migration/e2e-postgres.integration.test.mjs tests/migration/e2e-postgres-rich.integration.test.mjs tests/migration/v4-checks.integration.test.mjs",
     "verify": "npm run verify:v32-fixtures && npm run typecheck && npm test && npm run scan:release && npm audit --audit-level=moderate"
   },
   "dependencies": {

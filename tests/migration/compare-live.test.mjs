@@ -4,6 +4,7 @@ import { decisionManifestHash, generateDecisionManifest } from '../../scripts/v3
 import { transformRelational } from '../../scripts/v32-to-v4/transform/relational.mjs';
 import { comparePlanToTarget, compareSourceToTarget } from '../../scripts/v32-to-v4/validate/compare.mjs';
 import { formatInstantMicros, parseInstantMicros } from '../../scripts/v32-to-v4/lib/instant.mjs';
+import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
 
 // The column-by-column comparison, without a database: the target rows are made from the plan the way a
 // database would hold them (timestamps as RFC 3339 text), then damaged one way at a time. The comparison
@@ -199,5 +200,156 @@ describe('findings are plain data', () => {
     findings.add('observation-version-order', { table: 'observation_versions', observation_id: undefined, row_index: 0 });
     expect(findings.samples).toEqual([{ check: 'observation-version-order', table: 'observation_versions', row_index: 0 }]);
     expect(() => canonicalJson(findings.samples)).not.toThrow();
+  });
+});
+
+describe('a difference is sanctioned only if the compiled policy recorded it', () => {
+  const folded = {
+    migration_id: 'rmig_compare_fold', bundle_manifest_sha256: 'd'.repeat(64),
+    tables: {
+      entities: [{ id: 1, name: 'Ada', entity_type: 'person', primary_context: 'DEFAULT', salience: 'active', created_at: '2026-01-02T03:04:05Z', updated_at: '2026-01-02T03:04:06Z' }],
+      observations: [{ id: 3, entity_id: 1, content: 'x', weight: 'Light', added_at: '2026-01-02T04:00:00Z' }],
+    },
+  };
+  const foldedDraft = generateDecisionManifest(folded, { now: '2026-09-20T00:00:00.000Z' });
+  const foldedDecisions = { ...foldedDraft, reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
+  foldedDecisions.manifest_sha256 = decisionManifestHash(foldedDecisions);
+  const foldedCompiled = compilePolicy({ bundle: folded, decisions: foldedDecisions });
+  const foldedPlan = transformRelational({ bundle: folded, compiledPolicy: foldedCompiled });
+  const run = (compiledPolicy) => compareSourceToTarget({ sourceTables: folded.tables, targetTables: structuredClone(foldedPlan.members), compiled: compiledPolicy, decisions: foldedDecisions, importedAt: IMPORTED_AT, family: 'postgres' });
+
+  it('accepts a case-folded enum and context the policy recorded, and counts them', () => {
+    expect(foldedDraft.items).toEqual([]);
+    const result = run(foldedCompiled);
+    expect(result.findings.samples).toEqual([]);
+    expect(result.sanctioned).toMatchObject({ 'enum-case-folded': 1, 'context-case-folded': 1 });
+  });
+
+  it('refuses the same difference when the compiled policy has no record of it', () => {
+    const noEnums = structuredClone(foldedCompiled);
+    noEnums.value_map.enums = {};
+    const withoutEnum = run(noEnums);
+    expect(checksOf(withoutEnum)).toContain('cell-mismatch');
+    expect(find(withoutEnum, 'cell-mismatch').map((finding) => finding.column)).toContain('weight');
+    const noContexts = structuredClone(foldedCompiled);
+    noContexts.value_map.contexts = {};
+    expect(find(run(noContexts), 'cell-mismatch').map((finding) => finding.column)).toEqual(expect.arrayContaining(['primary_context']));
+    // and a recorded value that is not what the vocabulary allows is not accepted either
+    const wrong = structuredClone(foldedCompiled);
+    for (const key of Object.keys(wrong.value_map.enums)) wrong.value_map.enums[key] = 'heavy';
+    expect(find(run(wrong), 'cell-mismatch').map((finding) => finding.column)).toContain('weight');
+  });
+});
+
+describe('a merged entity is derived from the source rows and the reviewed rules, not from the compiled output', () => {
+  const mergeBundle = {
+    migration_id: 'rmig_compare_merge2', bundle_manifest_sha256: 'e'.repeat(64),
+    tables: {
+      entities: [
+        { id: 1, name: 'Ada', entity_type: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z' },
+        { id: 2, name: 'Ada', entity_type: 'person', primary_context: 'work', salience: 'heavy', created_at: '2026-01-05T00:00:00Z', updated_at: '2026-01-06T00:00:00Z' },
+      ],
+      observations: [{ id: 5, entity_id: 2, content: 'from the duplicate', added_at: '2026-01-08T00:00:00Z' }],
+    },
+  };
+  const draft = generateDecisionManifest(mergeBundle, { now: '2026-09-20T00:00:00.000Z' });
+  const choice = { action: 'merge', survivor_id: 1, merged_ids: [1, 2], field_rules: { name: { source_id: 1 }, entity_type: { source_id: 1 }, primary_context: { source_id: 1 }, salience: { source_id: 2 }, created_at: { source_id: 1 }, updated_at: { source_id: 1 } } };
+  const decisions = { ...draft, items: draft.items.map((item) => ({ ...item, choice })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
+  decisions.manifest_sha256 = decisionManifestHash(decisions);
+  const compiledMerge = compilePolicy({ bundle: mergeBundle, decisions });
+  const mergePlan = transformRelational({ bundle: mergeBundle, compiledPolicy: compiledMerge });
+  const compareWith = (compiledPolicy, target = structuredClone(mergePlan.members)) => compareSourceToTarget({ sourceTables: mergeBundle.tables, targetTables: target, compiled: compiledPolicy, decisions, importedAt: IMPORTED_AT, family: 'postgres' });
+
+  it('accepts the faithful result', () => {
+    expect(compareWith(compiledMerge).findings.samples).toEqual([]);
+    expect(mergePlan.members.people[0]).toMatchObject({ id: 1, salience: 'heavy' });
+  });
+
+  it('finds a compiled policy whose merged field values are not what the reviewed rules give, even when the target follows it', () => {
+    const tampered = structuredClone(compiledMerge);
+    tampered.id_map['entities:1'].field_values.salience = 'active'; // the rule says source 2 ('heavy')
+    const target = structuredClone(mergePlan.members);
+    target.people[0].salience = 'active'; // the target faithfully holds what the tampered policy says
+    const result = compareWith(tampered, target);
+    expect(checksOf(result)).toContain('merge-values-differ-from-reviewed-rules');
+    expect(find(result, 'cell-mismatch').map((finding) => finding.column)).toContain('salience');
+  });
+
+  it('finds a row skipped as merged that no reviewed decision merges, and a reviewed merge the policy did not apply', () => {
+    const skipsTheSurvivor = structuredClone(compiledMerge);
+    skipsTheSurvivor.id_map['entities:1'].merged = true;
+    expect(checksOf(compareWith(skipsTheSurvivor))).toContain('merged-row-without-reviewed-merge');
+    const forgotten = structuredClone(compiledMerge);
+    forgotten.id_map['entities:2'].merged = false;
+    expect(checksOf(compareWith(forgotten))).toContain('reviewed-merge-not-applied');
+  });
+});
+
+describe('a rename comes from the reviewed decision', () => {
+  it('finds a policy whose entity name differs from the reviewed rename', () => {
+    const renameBundle = {
+      migration_id: 'rmig_compare_rename', bundle_manifest_sha256: 'f'.repeat(64),
+      tables: { entities: [
+        { id: 1, name: 'Ada', entity_type: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z' },
+        { id: 2, name: 'Ada', entity_type: 'person', primary_context: 'work', salience: 'active', created_at: '2026-01-05T00:00:00Z', updated_at: '2026-01-06T00:00:00Z' },
+      ] },
+    };
+    const draft = generateDecisionManifest(renameBundle, { now: '2026-09-20T00:00:00.000Z' });
+    const decisions = { ...draft, items: draft.items.map((item) => ({ ...item, choice: { action: 'rename', names: { 1: 'Ada (home)', 2: 'Ada (work)' } } })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
+    decisions.manifest_sha256 = decisionManifestHash(decisions);
+    const compiledRename = compilePolicy({ bundle: renameBundle, decisions });
+    const members = transformRelational({ bundle: renameBundle, compiledPolicy: compiledRename }).members;
+    const clean = compareSourceToTarget({ sourceTables: renameBundle.tables, targetTables: structuredClone(members), compiled: compiledRename, decisions, importedAt: IMPORTED_AT, family: 'postgres' });
+    expect(clean.findings.samples).toEqual([]);
+    const tampered = structuredClone(compiledRename);
+    tampered.id_map['entities:2'].target_name = 'Ada (somewhere else)';
+    const target = structuredClone(members);
+    target.people.find((row) => row.id === 2).name = 'Ada (somewhere else)';
+    const result = compareSourceToTarget({ sourceTables: renameBundle.tables, targetTables: target, compiled: tampered, decisions, importedAt: IMPORTED_AT, family: 'postgres' });
+    expect(Object.keys(result.findings.counts)).toEqual(expect.arrayContaining(['entity-name-differs-from-reviewed-decision', 'cell-mismatch']));
+  });
+});
+
+describe('a reviewed re-link or nullification is derived from the decision, not from the compiled link map', () => {
+  const linkBundle = {
+    migration_id: 'rmig_compare_links', bundle_manifest_sha256: 'a'.repeat(64),
+    tables: {
+      entities: [{ id: 1, name: 'Ada', entity_type: 'person', primary_context: 'default', salience: 'active', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z' }],
+      observations: [
+        { id: 3, entity_id: 1, content: 'kept', added_at: '2026-01-07T00:00:00Z' },
+        { id: 4, entity_id: 1, content: 'two broken references', added_at: '2026-01-08T00:00:00Z', superseded_by: 900, linked_observation_id: 901 },
+      ],
+    },
+  };
+  const linkDraft = generateDecisionManifest(linkBundle, { now: '2026-09-20T00:00:00.000Z' });
+  const linkDecisions = { ...linkDraft, items: linkDraft.items.map((item) => ({ ...item, choice: item.field === 'superseded_by' ? 'null-if-allowed' : { action: 'link-by-reviewed-id', target_id: 3 } })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
+  linkDecisions.manifest_sha256 = decisionManifestHash(linkDecisions);
+  const linkCompiled = compilePolicy({ bundle: linkBundle, decisions: linkDecisions });
+  const linkPlan = transformRelational({ bundle: linkBundle, compiledPolicy: linkCompiled });
+  const targetWithDefaults = () => {
+    const tables = structuredClone(linkPlan.members);
+    for (const row of tables.observations) { row.superseded_by ??= null; row.linked_observation_id ??= null; }
+    return tables;
+  };
+  const compareLinks = (compiledPolicy, target) => compareSourceToTarget({ sourceTables: linkBundle.tables, targetTables: target, compiled: compiledPolicy, decisions: linkDecisions, importedAt: IMPORTED_AT, family: 'postgres' });
+
+  it('accepts the faithful result: one reference nullified, the other re-linked', () => {
+    const result = compareLinks(linkCompiled, targetWithDefaults());
+    expect(result.findings.samples).toEqual([]);
+    expect(result.sanctioned).toMatchObject({ 'reference-nullified-by-review': 1, 'reference-relinked-by-review': 1 });
+  });
+
+  it('finds a link map that disagrees with the decision even when the target follows the link map', () => {
+    const tampered = structuredClone(linkCompiled);
+    const rowHash = canonicalSha256(linkBundle.tables.observations[1]);
+    tampered.link_map[`observations:${rowHash}:superseded_by`] = 3; // the decision says NULL
+    delete tampered.link_map[`observations:${rowHash}:linked_observation_id`]; // the decision says re-link to 3
+    const target = targetWithDefaults();
+    const row = target.observations.find((candidate) => candidate.id === 4);
+    row.superseded_by = 3;
+    row.linked_observation_id = 901;
+    const result = compareLinks(tampered, target);
+    expect(find(result, 'link-map-differs-from-reviewed-decision').map((finding) => finding.column).sort()).toEqual(['linked_observation_id', 'superseded_by']);
+    expect(find(result, 'cell-mismatch').map((finding) => finding.column).sort()).toEqual(['linked_observation_id', 'superseded_by']);
   });
 });

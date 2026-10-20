@@ -33,9 +33,9 @@ The bundle is deterministic and every transformed row is bound to a `migration_i
 - **Entities, names, and kind:** v3 `entities` routes to v4 `people` or `nodes`. Known kinds are normalized to the v4 checks (for example `kin` to `peer_ai`, and `AI peer`/`peer_ai` to `peer_ai`). A collision-free source ID is retained when valid. A final kind must be reviewed when it is not unambiguous.
 - **Duplicate names:** v4 has a globally unique name surface where v3 may have repeated names by `primary_context`. Each collision requires a reviewed `merge` or `rename` decision. A merge names every source ID, one survivor, and deterministic field rules for `name`, kind, context, salience, and timestamps. A rename supplies the final unique name for every affected source ID. Dependent IDs and name-based relation endpoints use the same final map. Unresolved collisions refuse.
 - **Observation versions:** `observation_versions.changed_at` becomes `edited_at`; `version_num` is generated in `(observation_id, changed_at, id)` order. Invalid or tied timestamps need an explicit stable-ID tie-break and policy entry.
-- **Timestamps and dates:** Accept a strict RFC 3339 timestamp with an offset, or SQLite's exact UTC `YYYY-MM-DD HH:MM:SS` form. Other values, naive timestamps, and epoch-like values are policy items. A reviewed timezone is required before normalization to RFC 3339 UTC. Dates require a valid ISO date or a reviewed date mapping. Every point-in-time column of v3.2 is covered (a test checks the list against both exact source schemas). PostgreSQL's microseconds are kept to the last digit; a fraction finer than a microsecond is refused, never rounded. A PostgreSQL `timestamptz` is exported as RFC 3339 text in UTC, so the row hashes in any decision draft made by an earlier build of this migrator no longer match: such a draft is refused as stale, and you draft the decisions again from a new bundle.
+- **Timestamps and dates:** Accept a strict RFC 3339 timestamp with an offset, or SQLite's exact UTC `YYYY-MM-DD HH:MM:SS` form. Other values, naive timestamps, and epoch-like values are policy items. A reviewed timezone is required before normalization to RFC 3339 UTC. A value that is not a real calendar instant (`2026-02-30`, `T24:00:00`, a minute of 60) is never read as another day: it is a policy item whose only choice is to exclude the row, because no timezone can repair it. Dates require a valid ISO date or a reviewed date mapping. Every point-in-time column of v3.2 is covered (a test checks the list against both exact source schemas). PostgreSQL's microseconds are kept to the last digit; a fraction finer than a microsecond is refused, never rounded. A PostgreSQL `timestamptz` is exported as RFC 3339 text in UTC, so the row hashes in any decision draft made by an earlier build of this migrator no longer match (and a decision id now covers the column, so an older draft does not match either): such a draft is refused as stale, and you draft the decisions again from a new bundle.
 - **Enums and contexts:** Known enum aliases are normalized. Unknown enum values, entity kinds, and contexts need a reviewed mapping to a value allowed by v4 checks; the default is refusal, not coercion.
-- **JSON:** `links`, `connections`, `tags`, `source_observation_ids`, `data`, and `sit_notes` are parsed and checked for their expected array/object shape. Invalid JSON is a policy item. It may be mapped only with a reviewed, shape-preserving choice; it is never silently replaced with `[]`.
+- **JSON:** `links`, `connections`, `tags`, `source_observation_ids`, `data`, and `sit_notes` are parsed and checked for their expected array/object shape. Invalid JSON is a policy item. It may be mapped only with a reviewed, shape-preserving choice; it is never silently replaced with `[]`. A JSON number that a JavaScript number cannot carry exactly (for example `12345678901234567891`, which would be stored as `12345678901234567000`) is the same kind of policy item, and `validate` compares JSON digit for digit.
 - **Foreign keys:** Integer and name references are remapped through the final ID/name map. A broken or excluded reference is refused unless a reviewed policy explicitly excludes or nulls a nullable link. Stale source IDs never survive just because an insert would accept them.
 - **Dormancy:** `dormant_observations` becomes v4 `orphan_observations` under the documented semantic translation. Attempts and timestamps are preserved and the terminology change is reported.
 - **Tensions:** `tensions.sit_count` becomes visits. `status` and `sit_notes` have no direct v4 columns, so every affected row needs a reviewed action such as preserving visits and opening, or preserving visits and resolving with explicit resolution fields. The source row remains represented in the audit/loss report.
@@ -169,6 +169,8 @@ node scripts/v32-to-v4/cli.mjs compile-policy \
   --passphrase-file <passphrase-file>
 ```
 
+The compiled policy holds migrated content (entity names, merged values), so it is **written encrypted by default**, with the same passphrase file that protects the bundle (AES-256-GCM, the same key derivation). It is plaintext only if you give both `--allow-plaintext-artifact` and `--acknowledge-plaintext-risk`; one of the two alone is refused (`RMIG-E-BUNDLE-PLAINTEXT-ACK`). Every command that reads it opens either form, and a wrong passphrase, a file of the wrong kind or a changed file is refused (`RMIG-E-BUNDLE-DECRYPT`). The command prints a summary (hash, loss count, whether the file is encrypted), never the policy, and it never replaces an existing `--out`: choose a new path.
+
 ### 7. Build the relational plan
 
 ```bash
@@ -179,7 +181,7 @@ node scripts/v32-to-v4/cli.mjs plan-relational \
   --out <relational-staging-plan.json>
 ```
 
-The compiled policy must be unchanged since `compile-policy` wrote it and bound to this bundle. The plan holds every v4 row, the loss report (what is dropped, what v4 fills in), the image inventory and the re-embedding job plan. A reviewed decision that produces a row v4 cannot hold is a refusal, not a skipped row. The command prints the `bundle_manifest_sha256` and `compiled_policy_sha256` that `prepare-target` takes. The plan and the compiled policy contain the migrated content in plaintext: keep them with the same care as the bundle's contents.
+The compiled policy must be unchanged since `compile-policy` wrote it and bound to this bundle. The plan holds every v4 row, the loss report (what is dropped, what v4 fills in), the image inventory and the re-embedding job plan. A reviewed decision that produces a row v4 cannot hold is a refusal, not a skipped row. The command prints the `bundle_manifest_sha256` and `compiled_policy_sha256` that `prepare-target` takes. The plan holds the migrated content, so like the compiled policy it is written encrypted with the passphrase file unless you give both `--allow-plaintext-artifact` and `--acknowledge-plaintext-risk`. `prepare-target`, `dry-run`, `import`, `plan-images`, `plan-reembed` and `validate` read it (or the compiled policy) with the same `--passphrase-file`, and open a plaintext one without it. The decision files stay plaintext on purpose, because a person edits them; they hold hashes of ambiguous values and the choices you wrote, not the rows.
 
 ### 8. Inspect and prepare the fresh target
 
@@ -194,7 +196,8 @@ node scripts/v32-to-v4/cli.mjs prepare-target \
   --migration-id <migration-id> \
   --bundle-manifest-sha256 <bundle-manifest-sha256> \
   --compiled-policy-sha256 <compiled-policy-sha256> \
-  --plan <relational-staging-plan.json>
+  --plan <relational-staging-plan.json> \
+  --passphrase-file <passphrase-file>
 ```
 
 For a SQLite or D1-export source add `--source-kind sqlite` (or `d1-export`) and give the local path as `--source`; the identity checked against the target is then the file's. `inspect-target` must report a distinct fresh target. A concurrent session's temporary tables do not count as objects; a user table, any other schema, an extension other than `vector`, a view, a sequence, a function or a type does. `prepare-target` applies the released v4 migration set unchanged, verifies its checksums, creates a run-scoped staging schema and prints its name (`schema=`). The optional `--resume-schema <schema>` input is intentionally rejected: there is no general resume contract, so discard an interrupted target and restart against a fresh target. Existing/nonempty, same-source, or wrong-schema targets refuse.
@@ -206,29 +209,29 @@ node scripts/v32-to-v4/cli.mjs dry-run \
   --target env:RMIG_TARGET \
   --plan <relational-staging-plan.json> \
   --staging-schema <staging-schema> \
-  --receipt-out <dry-run-receipt.json>
+  --receipt-out <dry-run-receipt.json> \
+  --passphrase-file <passphrase-file>
 
 node scripts/v32-to-v4/cli.mjs import \
   --target env:RMIG_TARGET \
   --plan <relational-staging-plan.json> \
   --dry-run <dry-run-receipt.json> \
   --staging-schema <staging-schema> \
-  --receipt-out <import-receipt.json>
+  --receipt-out <import-receipt.json> \
+  --passphrase-file <passphrase-file>
 ```
 
 Do not import without a successful dry-run receipt bound to the same plan, target identity, schema, policy, bundle, and migrator version. This is a gate, not a suggestion. The import commits once; the receipt path is reserved before it runs, so a committed import is never left without its receipt file (the same receipt is also recorded in the target's `migration_import_receipts` table).
 
 ### 10. Plan and hand off images
 
-Current image parsers use inventory/plan files:
+The image plan for a migration is the image inventory inside the relational plan, the one derived from the image rows that were imported. Take it from there:
 
 ```bash
 node scripts/v32-to-v4/cli.mjs plan-images \
-  --input <image-inventory.json> \
-  --out <image-plan.json> \
-  --migration-id <migration-id> \
-  --bundle-manifest-sha256 <bundle-manifest-sha256> \
-  --compiled-policy-sha256 <compiled-policy-sha256>
+  --plan <relational-staging-plan.json> \
+  --passphrase-file <passphrase-file> \
+  --out <image-plan.json>
 
 node scripts/v32-to-v4/cli.mjs copy-images \
   --plan <image-plan.json> \
@@ -238,6 +241,8 @@ node scripts/v32-to-v4/cli.mjs copy-images \
   --receipt-out <image-receipt.json>
 ```
 
+`plan-images --plan` takes the migration id and the bindings from the relational plan, so it does not accept `--migration-id` or the two hash options with it. `plan-images --input <image-inventory.json>` (rows you supply) and `--source <directory>` (a directory's files) build a standalone inventory with `--migration-id`; that is useful for rehearsing a copy, but such a plan is not bound to the imported rows and `validate` will not accept it as image evidence. `plan-images`, `copy-images`, `plan-reembed` and every other command that writes a file refuse to replace an existing one.
+
 For the external R2 handoff, use the same `copy-images` command with `--adapter r2 --external-receipt <external-r2-receipt.json> --trusted-public-key <trusted-public-key.pem>` instead of filesystem source/target. The operator/provider supplies the receipt; the CLI validates it and does not perform the network copy.
 
 ### 11. Plan provider re-embedding
@@ -245,6 +250,7 @@ For the external R2 handoff, use the same `copy-images` command with `--adapter 
 ```bash
 node scripts/v32-to-v4/cli.mjs plan-reembed \
   --input <relational-staging-plan.json> \
+  --passphrase-file <passphrase-file> \
   --images <image-plan.json> \
   --out <reembed-plan.json> \
   --migration-id <migration-id> \
@@ -276,6 +282,7 @@ node scripts/v32-to-v4/cli.mjs validate \
 
 node scripts/v32-to-v4/cli.mjs status \
   --report <validation-report.json> \
+  --passphrase-file <passphrase-file> \
   --cutover-evidence <cutover-evidence.json> \
   --operator-cutover-ack
 ```
@@ -286,10 +293,14 @@ node scripts/v32-to-v4/cli.mjs status \
 - **The receipts.** The dry-run and import receipts are internally valid, derived from this plan, bound to this bundle, policy and target, and the import receipt equals the record the importer committed inside the target.
 - **The source.** The live source still holds, row for row, what the bundle holds, with the same catalog fingerprint; a source that moved since the export is a finding.
 - **The target, column by column.** Every mapped column of every source row is compared with what the target holds, in exact text: timestamps as exact microsecond instants (not text, not milliseconds), JSON as a value, numbers, ids, and text byte for byte. A cell may differ from the source only where the reviewed policy accounts for that exact cell (a remapped id, an enum alias, a normalized timestamp, a reviewed decision, a v4 default for a NULL), and each such difference is counted by kind in the report. The plan is then compared with the target row by row as well. Missing rows, extra rows and duplicates are findings.
-- **The target's own integrity.** Every constraint validated, every index valid, every foreign key re-proved with an anti-join, every unique index free of duplicates, every CHECK expression re-evaluated against the stored rows, every id sequence beyond the largest id, every entity routed to exactly one people/nodes row, observation versions numbered without gaps and in time order, the released migration set recorded.
-- **External evidence.** Supplied image and re-embedding receipts are validated against their plans, and the re-embedding plan must be the one these imported rows produce. Evidence that is not supplied is not an error: the state stays `data-imported-images-pending` or `data-imported-not-search-ready`, never `ready-for-cutover`. A plan with no images, or no jobs, has nothing external to prove.
+- **The target's own integrity.** Every constraint validated, every index valid, every foreign key re-proved with an anti-join, every unique index free of duplicates, every released CHECK expression re-evaluated against the stored rows (only a CHECK that is exactly one of the released v4 schema's, listed in `scripts/v32-to-v4/spec/v4-checks.json`, is ever run; any other CHECK in the target is a finding, `check-constraint-unexpected`, and its text is never executed, because it would run with the validator's rights; a released CHECK that is missing is `check-constraint-missing`), every id sequence beyond the largest id, every entity routed to exactly one people/nodes row, observation versions numbered without gaps and in time order, the released migration set recorded.
+- **External evidence.** Evidence is held to the plans `validate` derives itself, never to the files it is handed. The image plan you supply must be, in canonical form, the image inventory in the relational plan that `validate` rebuilds from the bundle and the decisions (a smaller, an empty or a different image plan is a finding even when its receipt matches it exactly), every image row the target holds must be listed in it and every listed image must have its row, and its receipt must cover every planned object. The re-embedding plan must be the one these imported rows produce, and its receipts are checked against the content the target holds now: a receipt whose row changed or is gone is a finding (`target-content-changed`, `target-row-missing`). The proof of an image's bytes is the signed or filesystem receipt, not the target. Evidence that is not supplied is not an error: the state stays `data-imported-images-pending` or `data-imported-not-search-ready`, never `ready-for-cutover`. A plan with no images, or no jobs, has nothing external to prove.
 
-The report states counts, sanctioned differences by kind, invariants and findings by check (table, column, and an integer id or a hash of the key, never row content), and its hash. Any finding makes `validate` write the report with status `refused` and exit with `RMIG-E-VALIDATION`; it never overwrites an earlier report. `status` must be read after validation and after any separately created cutover evidence. It does not perform cutover.
+The report states counts, sanctioned differences by kind, invariants and findings by check (table, column, and an integer id or a hash of the key, never row content), and its hash. Any finding makes `validate` write the report with status `refused` and exit with `RMIG-E-VALIDATION`; it never overwrites an earlier report, and the refusal names the report's real path (or says the path is withheld when it contains text that looks like a secret; the report is then at the `--out` you gave).
+
+**What `validate` takes from the compiled output, and what it derives itself.** Column by column it compares the live target with the verified source rows, and derives for itself: timestamp instants, JSON values (digit for digit, so a number JSON.parse would round is a difference), enum and context mappings (a case fold, an alias or a reviewed map is accepted only if the compiled policy recorded that exact value for that exact cell), version numbering, the values a reviewed entity merge gives the survivor (from the source rows and the reviewed field rules, not from the policy's own field values), a reviewed rename, and the reasons a row is skipped as merged. What it still takes from the compiled policy is stated here so nothing is assumed: the id map (target ids and tables of non-merged rows), the link map (reviewed re-links and nullifications), the name map used for relation endpoints, the list of reviewed exclusions together with the rows excluded because they depend on an excluded row, and entity kinds that a reviewed decision chose. Those come from the same reviewed decisions `validate` recompiles itself, so they are as good as the decisions, but they are not re-derived a second time.
+
+**The seal.** `report_sha256` is a plain hash and anyone can recompute it after an edit. So when `validate` has a passphrase file (`--passphrase-file`, or `RM_MIGRATION_PASSPHRASE_FILE`) it also stores a keyed seal in the report: an HMAC whose key is derived (scrypt, a fresh salt per report) from that file. `status --report <report> --passphrase-file <passphrase-file>` verifies the seal and reports a state only for a report whose hash is its own and whose seal verifies. A report that was edited, or sealed with another file, is refused (exit 2). A report with no seal is labelled `unverified` with the plain statement that it is **not proof**; it is never reported as `ready-for-cutover`. The seal shows that the report was produced by a holder of the passphrase file and is unchanged since; it does not make the holder trustworthy. Cutover evidence that is supplied but does not validate (or is for another report) makes `status` answer `refused` and exit 2; it is never quietly set aside for a milder state. `status` must be read after validation and after any separately created cutover evidence. It does not perform cutover.
 
 ## Risks, sizing, and quiescence
 
@@ -373,4 +384,4 @@ Rollback means stop v4 traffic and restore the application to the untouched v3 d
 
 ## Sensitive artifact retention
 
-Keep the encrypted bundle, manifests, decisions, the compiled policy and the relational staging plan (both hold the migrated content in plaintext), source/target reports, image inventory, external receipts, and validation evidence only for the approved audit/rollback window. Restrict filesystem and object permissions, keep passphrases outside the artifact directory, and do not place sensitive values in filenames, logs, chat, or issue trackers. After the window, destroy the bundle, plaintext temporary exports, local D1 materializations, passphrase file, copied image staging area, and provider handoff artifacts using the organization's approved secure-destruction procedure. Retain only redacted hashes and non-sensitive evidence required by policy.
+Keep the encrypted bundle, manifests, decisions, the compiled policy and the relational staging plan (both hold the migrated content and are encrypted with the passphrase file unless you wrote them as plaintext, in which case treat them like a plaintext bundle), source/target reports, image inventory, external receipts, and validation evidence only for the approved audit/rollback window. Restrict filesystem and object permissions, keep passphrases outside the artifact directory, and do not place sensitive values in filenames, logs, chat, or issue trackers. After the window, destroy the bundle, plaintext temporary exports, local D1 materializations, passphrase file, copied image staging area, and provider handoff artifacts using the organization's approved secure-destruction procedure. Retain only redacted hashes and non-sensitive evidence required by policy.

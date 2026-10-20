@@ -45,6 +45,8 @@ function validatePolicyInput(bundle, decisions) {
   try { validateDecisionManifest(decisions, { bundleManifestSha256: hash, expectedItems: expected }); }
   catch (error) { refuse(error.message, { bundle_manifest_sha256: hash }, /stale|source row|missing or extra decisions/iu.test(error.message) ? 'RMIG-E-POLICY-MISMATCH' : 'RMIG-E-POLICY-UNRESOLVED'); }
   if (!decisions.reviewed) refuse('A reviewed decision manifest is required; unresolved policy choices are not accepted.');
+  const bundleMigrationId = bundle.migration_id ?? bundle.manifest?.migration_id;
+  if (bundleMigrationId !== undefined && decisions.migration_id !== bundleMigrationId) refuse('The reviewed decisions belong to a different migration than this bundle.', { bundle_manifest_sha256: hash }, 'RMIG-E-POLICY-MISMATCH');
   for (const item of expected) if (choiceForItem(decisions, item) === undefined) refuse('Every generated ambiguity must have an explicit reviewed choice.', { decision_id: item.decision_id });
 }
 function effectiveFamily(bundle) { const sourceKind = bundle?.source_kind ?? bundle?.manifest?.source_kind; return sourceKind === 'd1-export' ? 'sqlite' : sourceKind; }

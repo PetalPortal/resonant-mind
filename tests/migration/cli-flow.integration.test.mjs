@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import pg from 'pg';
 import { describe, expect, it } from 'vitest';
 import { assertNoSecrets, runCli } from './helpers/cli-run.mjs';
+import { buildImageInventory } from '../../scripts/v32-to-v4/external/images.mjs';
+import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
+import { readArtifactFile } from './helpers/artifacts.mjs';
 import { adminUrl, hasAdminDatabase, quoteIdentifier, urlFor, withScratchDatabase, withScratchSource } from './helpers/postgres-scratch.mjs';
 import { RICH_POSTGRES_SEED, RICH_REVIEW, SQLITE_REVIEW, createD1Export, createSqliteSource } from './helpers/seeds.mjs';
 
@@ -51,12 +54,12 @@ function runPipeline({ work, env, source, sourceKind, migrationId, review }) {
 
   const inspected = run('inspect-target', ['inspect-target', '--target', 'env:RMIG_TARGET', '--source', sourceKind === 'postgres' ? source : source, '--source-kind', sourceKind]);
   expect(inspected.stdout).toBe('inspect-target: fresh=true; pgvector=true\n');
-  const prepared = run('prepare-target', ['prepare-target', '--target', 'env:RMIG_TARGET', '--source', source, '--source-kind', sourceKind, '--migration-id', migrationId, '--bundle-manifest-sha256', hashes.bundle_manifest_sha256, '--compiled-policy-sha256', hashes.compiled_policy_sha256, '--plan', file('plan.json')]);
+  const prepared = run('prepare-target', ['prepare-target', '--target', 'env:RMIG_TARGET', '--source', source, '--source-kind', sourceKind, '--migration-id', migrationId, '--bundle-manifest-sha256', hashes.bundle_manifest_sha256, '--compiled-policy-sha256', hashes.compiled_policy_sha256, '--plan', file('plan.json'), '--passphrase-file', file('passphrase')]);
   const schema = /schema=(rmig_[A-Za-z0-9_]+); status=staged/u.exec(prepared.stdout)?.[1];
   expect(schema, prepared.output).toBeTruthy();
-  const dryRun = run('dry-run', ['dry-run', '--target', 'env:RMIG_TARGET', '--plan', file('plan.json'), '--staging-schema', schema, '--receipt-out', file('dry-run-receipt.json')]);
+  const dryRun = run('dry-run', ['dry-run', '--target', 'env:RMIG_TARGET', '--plan', file('plan.json'), '--staging-schema', schema, '--receipt-out', file('dry-run-receipt.json'), '--passphrase-file', file('passphrase')]);
   expect(dryRun.stdout).toMatch(/^dry-run: receipt_sha256=[0-9a-f]{64}; report=/u);
-  const imported = run('import', ['import', '--target', 'env:RMIG_TARGET', '--plan', file('plan.json'), '--dry-run', file('dry-run-receipt.json'), '--staging-schema', schema, '--receipt-out', file('import-receipt.json')]);
+  const imported = run('import', ['import', '--target', 'env:RMIG_TARGET', '--plan', file('plan.json'), '--dry-run', file('dry-run-receipt.json'), '--staging-schema', schema, '--receipt-out', file('import-receipt.json'), '--passphrase-file', file('passphrase')]);
   expect(imported.stdout).toMatch(/^import: status=complete; receipt_sha256=[0-9a-f]{64}; rows=\d+; receipt=/u);
   return { file, outputs, run, hashes, schema, bundleArgs };
 }
@@ -85,7 +88,7 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
           // The clean run: no finding, and the state is honest about what is still external.
           const valid = step('validate', validateArgs({ ...common, out: 'validation.json' }), env);
           outputs.push(valid.output);
-          expect(valid.stdout).toMatch(/^validate: status=data-imported-images-pending; report_sha256=[0-9a-f]{64}; violations=0; cells_compared=\d+\n$/u);
+          expect(valid.stdout).toMatch(/^validate: status=data-imported-images-pending; report_sha256=[0-9a-f]{64}; sealed=true; violations=0; cells_compared=\d+\n$/u);
           const report = JSON.parse(readFileSync(file('validation.json'), 'utf8'));
           expect(report).toMatchObject({ status: 'data-imported-images-pending', violations: [], violation_counts: {}, validation_mode: 'live', images: { planned: 1, complete: false }, imported: true, relational_reconciliation_complete: true, reembed_complete: false });
           expect(report.comparison.source_to_target.cells_compared).toBeGreaterThan(250);
@@ -95,12 +98,28 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
           expect(report.invariants.foreign_keys).toBeGreaterThan(5);
           expect(report.counts.target.people).toBe(2);
           expect(report.counts.target.nodes).toBe(1);
-          const status = step('status', ['status', '--report', file('validation.json')], env);
+          const status = step('status', ['status', '--report', file('validation.json'), '--passphrase-file', file('passphrase')], env);
           outputs.push(status.output);
-          expect(status.stdout).toMatch(/^status: data-imported-images-pending; report_sha256=/u);
+          expect(status.stdout).toMatch(/^status: data-imported-images-pending; report_verified=true; report_sha256=/u);
           // the same validation twice must not overwrite its evidence
           const again = step('validate again', validateArgs({ ...common, out: 'validation.json' }), env, 2);
           expect(again.stderr).toMatch(/already exists/u);
+
+          // Image evidence is held to the image plan validate derives, and the CLI hands that plan out: plan-images --plan.
+          step('plan-images from the relational plan', ['plan-images', '--plan', file('plan.json'), '--passphrase-file', file('passphrase'), '--out', file('image-plan.json')], env);
+          const imagePlan = JSON.parse(readFileSync(file('image-plan.json'), 'utf8'));
+          expect(imagePlan).toEqual(readArtifactFile(file('plan.json'), 'relational-plan', file('passphrase')).image_inventory);
+          expect(imagePlan.entries).toHaveLength(1);
+          // an empty image plan, with a receipt that matches it exactly, is not evidence for the planned image
+          const emptyImagePlan = buildImageInventory({ images: [], migrationId, bundleManifestSha256: imagePlan.bundle_manifest_sha256, compiledPolicySha256: imagePlan.compiled_policy_sha256 });
+          const emptyReceiptBody = { format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: migrationId, plan_sha256: emptyImagePlan.plan_sha256, bundle_manifest_sha256: imagePlan.bundle_manifest_sha256, compiled_policy_sha256: imagePlan.compiled_policy_sha256, entries: [] };
+          writeFileSync(file('image-plan-empty.json'), JSON.stringify(emptyImagePlan));
+          writeFileSync(file('image-receipt-empty.json'), JSON.stringify({ ...emptyReceiptBody, receipt_sha256: canonicalSha256(emptyReceiptBody) }));
+          const emptyEvidence = step('validate with an empty image plan', validateArgs({ ...common, out: 'validation-empty-images.json', extra: ['--image-plan', file('image-plan-empty.json'), '--image-receipt', file('image-receipt-empty.json')] }), env, 2);
+          outputs.push(emptyEvidence.output);
+          const emptyReport = JSON.parse(readFileSync(file('validation-empty-images.json'), 'utf8'));
+          expect(Object.keys(emptyReport.violation_counts).sort()).toEqual(['external-image-plan-not-the-planned-inventory', 'image-row-not-in-image-plan']);
+          expect(emptyReport).toMatchObject({ status: 'refused', images_complete: false });
 
           // Each kind of damage is found, by a check that names it. A clone of the migrated target is damaged
           // each time (a clone is a different database, so identity findings come with every one of them).
@@ -112,7 +131,7 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
             ['an extra row', "INSERT INTO journals (content) VALUES ('stray')", ['target-row-without-source', 'target-row-not-in-plan']],
             ['an enum value changed', "UPDATE threads SET thread_type = 'task' WHERE id = 'thr-2'", ['cell-mismatch', 'plan-cell-mismatch']],
             ['a sequence left behind the data', 'ALTER SEQUENCE journals_id_seq RESTART WITH 1', ['sequence-behind-data']],
-            ['a CHECK constraint added but never validated, that stored rows violate', 'ALTER TABLE journals ADD CONSTRAINT journals_never_valid CHECK (length(content) > 100000) NOT VALID', ['constraint-not-validated', 'check-violations']],
+            ['a CHECK constraint added that the released schema does not have (never run, so its violations are not even read)', 'ALTER TABLE journals ADD CONSTRAINT journals_never_valid CHECK (length(content) > 100000) NOT VALID', ['constraint-not-validated', 'check-constraint-unexpected']],
             ['the importer\'s own receipt row removed', 'DELETE FROM migration_import_receipts', ['import-receipt-not-in-target', 'cell-mismatch', 'plan-cell-mismatch', 'recorded-default-not-observed']], // without the importer's own record the import time is unknown, so the v4 defaults cannot be shown to be right
           ];
           for (const [index, [label, sql, expected]] of damage.entries()) {
@@ -163,7 +182,7 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
           }
 
           // Edited artifacts do not validate: a plan, a reviewed decision file, a receipt.
-          const plan = JSON.parse(readFileSync(file('plan.json'), 'utf8'));
+          const plan = readArtifactFile(file('plan.json'), 'relational-plan', file('passphrase'));
           plan.members.journals[0].content = 'edited';
           writeFileSync(file('plan-edited.json'), JSON.stringify(plan));
           const editedPlan = step('validate an edited plan', validateArgs({ ...common, out: 'validation-plan.json', plan: 'plan-edited.json' }), env, 2);
@@ -219,7 +238,7 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
         expect(pendingReport.comparison.source_to_target.sanctioned_differences).toMatchObject({ 'timestamp-reviewed-timezone': 1, 'enum-alias': 1, 'entity-renamed-or-merged-by-review': 2, 'endpoint-renamed-by-review': 1, 'tension-state-from-review': expect.any(Number), 'null-replaced-by-v4-default': 1 });
 
         // The external provider's work, as the operator supplies it: a job plan from the CLI and a receipt for every job.
-        step('plan-reembed', ['plan-reembed', '--input', file('plan.json'), '--migration-id', migrationId, '--bundle-manifest-sha256', hashes.bundle_manifest_sha256, '--compiled-policy-sha256', hashes.compiled_policy_sha256, '--out', file('reembed-plan.json')], env);
+        step('plan-reembed', ['plan-reembed', '--input', file('plan.json'), '--passphrase-file', file('passphrase'), '--migration-id', migrationId, '--bundle-manifest-sha256', hashes.bundle_manifest_sha256, '--compiled-policy-sha256', hashes.compiled_policy_sha256, '--out', file('reembed-plan.json')], env);
         const reembedPlan = JSON.parse(readFileSync(file('reembed-plan.json'), 'utf8'));
         const receipts = (planOf, model = 'synthetic-model') => ({ format_version: 1, migration_id: migrationId, plan_sha256: planOf.plan_sha256, bundle_manifest_sha256: hashes.bundle_manifest_sha256, compiled_policy_sha256: hashes.compiled_policy_sha256, receipts: planOf.jobs.map((job) => ({ job_id: job.job_id, migration_id: migrationId, plan_sha256: planOf.plan_sha256, bundle_manifest_sha256: hashes.bundle_manifest_sha256, compiled_policy_sha256: hashes.compiled_policy_sha256, target_locator: job.target_locator, status: 'complete', model, dimension: 3, content_hash: job.content_hash })) });
         const incomplete = receipts(reembedPlan);
@@ -232,13 +251,12 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
         writeFileSync(file('reembed-receipts.json'), JSON.stringify(receipts(reembedPlan)));
         const ready = step('validate with receipts', validateArgs({ ...common, out: 'validation-ready.json', extra: ['--reembed-plan', file('reembed-plan.json'), '--reembed-receipts', file('reembed-receipts.json')] }), env);
         expect(ready.stdout).toMatch(/^validate: status=ready-for-cutover;/u);
-        const status = step('status', ['status', '--report', file('validation-ready.json')], env);
+        const status = step('status', ['status', '--report', file('validation-ready.json'), '--passphrase-file', file('passphrase')], env);
         expect(status.stdout).toMatch(/^status: ready-for-cutover;/u);
 
         // A job plan that is not the one these imported rows produce is not accepted, receipts or not.
         const foreign = { ...reembedPlan, jobs: reembedPlan.jobs.slice(1), searchable_job_count: reembedPlan.jobs.length - 1 };
         delete foreign.plan_sha256;
-        const { canonicalSha256 } = await import('../../scripts/v32-to-v4/lib/hash.mjs');
         foreign.plan_sha256 = canonicalSha256(foreign);
         writeFileSync(file('reembed-plan-foreign.json'), JSON.stringify(foreign));
         writeFileSync(file('reembed-receipts-foreign.json'), JSON.stringify(receipts(foreign)));
