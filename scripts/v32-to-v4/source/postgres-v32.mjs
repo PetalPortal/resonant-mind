@@ -12,7 +12,7 @@ const TABLES = new Set(sourceSpecFor('postgres').tables.map(({ name }) => name))
 
 // node-pg turns timestamptz, timestamp and date into JavaScript Dates, which round microseconds
 // away and are not plain data for the bundle's canonical JSON. The source keeps PostgreSQL's own
-// text instead: the session is UTC with ISO dates (SOURCE_SESSION_OPTIONS), a timestamptz becomes
+// text instead: the snapshot transaction is UTC with ISO dates (SOURCE_SESSION_SETTINGS), a timestamptz becomes
 // the same instant in RFC 3339 with nothing rounded, and a naive timestamp or a date stays as
 // PostgreSQL wrote it, for the reviewed policy to decide. json and jsonb (embeddings.metadata)
 // would be parsed into JavaScript objects, which are not plain row data either; they stay as the
@@ -24,7 +24,21 @@ const OID = Object.freeze({ json: 114, jsonb: 3802, date: 1082, timestamp: 1114,
 // default becoming nextval('public.t_id_seq'::regclass)) without the schema being any different.
 // With public pinned, the text is a function of the catalog alone, and an exact comparison does not
 // need to rewrite any of it.
-export const SOURCE_SESSION_OPTIONS = '-c TimeZone=UTC -c DateStyle=ISO,YMD -c search_path=public';
+//
+// These are set with set_config(name, value, true) inside the read-only snapshot transaction, never
+// as connection startup options. A transaction-mode pooler (Neon's pooled endpoint, PgBouncer) may
+// refuse the startup `options` parameter, and may hand a later statement to a different server
+// connection, so a session-level SET would not hold either; a transaction-local setting does,
+// because the whole snapshot is one transaction on one server connection. Every read that depends on
+// them (catalog, rows, counts) therefore only runs inside that transaction.
+export const SOURCE_SESSION_SETTINGS = Object.freeze([
+  Object.freeze({ name: 'TimeZone', value: 'UTC' }),
+  Object.freeze({ name: 'DateStyle', value: 'ISO, YMD' }),
+  Object.freeze({ name: 'search_path', value: 'public' }),
+  // 1 is the default; a role or database with a lower value prints float4/float8 with fewer digits,
+  // which would silently change the number a row holds.
+  Object.freeze({ name: 'extra_float_digits', value: '1' }),
+]);
 
 /** PostgreSQL's ISO timestamptz text as RFC 3339, digit for digit; anything else is returned as it was. */
 export function rfc3339FromPostgres(text) {
@@ -33,6 +47,11 @@ export function rfc3339FromPostgres(text) {
   const [, day, time, fraction, hours, minutes = '00'] = match;
   const offset = hours === '+00' && minutes === '00' ? 'Z' : `${hours}:${minutes}`;
   return `${day}T${time}${fraction ? `.${fraction.padEnd(3, '0')}` : ''}${offset}`;
+}
+
+/** The pg client settings for a source connection: no startup options, so a pooler cannot refuse them. */
+export function postgresClientConfig(connectionString) {
+  return { connectionString, types: sourceTypes() };
 }
 
 function sourceTypes() {
@@ -208,7 +227,7 @@ export class PostgresV32Adapter {
     this.#connectionString = value;
     this.#clientFactory = clientFactory ?? ((connectionString) => {
       const { Client } = require('pg');
-      return new Client({ connectionString, types: sourceTypes(), options: SOURCE_SESSION_OPTIONS });
+      return new Client(postgresClientConfig(connectionString));
     });
     this.#batchSize = batchSize;
     this.#client = null;
@@ -248,13 +267,18 @@ export class PostgresV32Adapter {
     return { ...postgresIdentityFromRow(row), source_reference: this.sourceReference };
   }
 
+  #requireSnapshot() {
+    if (!this.#snapshot) throw refusal('RMIG-E-SOURCE-NOT-READONLY', 'This read depends on the snapshot transaction settings (TimeZone, DateStyle, search_path); call beginSnapshot() first.');
+  }
+
   async catalog() {
-    const [columns, constraints, checks, indexes] = await Promise.all([
-      this.#query(POSTGRES_CATALOG_QUERIES.columns, [SCHEMA]),
-      this.#query(POSTGRES_CATALOG_QUERIES.constraints, [SCHEMA]),
-      this.#query(POSTGRES_CATALOG_QUERIES.checks, [SCHEMA]),
-      this.#query(POSTGRES_CATALOG_QUERIES.indexes, [SCHEMA]),
-    ]);
+    this.#requireSnapshot();
+    // One statement at a time: a pg client queues concurrent queries today, and a later pg major
+    // removes that, so the catalog is read the plain way.
+    const columns = await this.#query(POSTGRES_CATALOG_QUERIES.columns, [SCHEMA]);
+    const constraints = await this.#query(POSTGRES_CATALOG_QUERIES.constraints, [SCHEMA]);
+    const checks = await this.#query(POSTGRES_CATALOG_QUERIES.checks, [SCHEMA]);
+    const indexes = await this.#query(POSTGRES_CATALOG_QUERIES.indexes, [SCHEMA]);
     return buildPostgresCatalog(columns.rows, constraints.rows, checks.rows, indexes.rows);
   }
 
@@ -265,6 +289,12 @@ export class PostgresV32Adapter {
     try {
       const result = await this.#query('SHOW transaction_read_only');
       if (String(result.rows[0]?.transaction_read_only).toLowerCase() !== 'on') throw refusal('RMIG-E-SOURCE-NOT-READONLY', 'PostgreSQL did not confirm a read-only transaction.');
+      // Transaction-local (is_local = true): SELECT is the only statement kind used, and the settings
+      // end with the transaction, so nothing leaks to whoever uses this server connection next.
+      const settings = SOURCE_SESSION_SETTINGS;
+      await this.#query(`SELECT ${settings.map((_setting, index) => `set_config($${index * 2 + 1}, $${index * 2 + 2}, true)`).join(', ')}`, settings.flatMap(({ name, value }) => [name, value]));
+      const applied = (await this.#query("SELECT current_setting('TimeZone') AS timezone, current_setting('DateStyle') AS datestyle, current_setting('search_path') AS search_path, current_setting('extra_float_digits') AS extra_float_digits")).rows[0] ?? {};
+      if (applied.timezone !== 'UTC' || applied.datestyle !== 'ISO, YMD' || applied.search_path !== 'public' || applied.extra_float_digits !== '1') throw refusal('RMIG-E-SOURCE-DRIFT', 'PostgreSQL did not apply the snapshot session settings (TimeZone UTC, DateStyle ISO, YMD, search_path public, extra_float_digits 1).', { applied: { timezone: String(applied.timezone), datestyle: String(applied.datestyle), search_path: String(applied.search_path), extra_float_digits: String(applied.extra_float_digits) } });
       this.#snapshot = true;
     } catch (error) {
       await this.endSnapshot();
@@ -273,6 +303,7 @@ export class PostgresV32Adapter {
   }
 
   async *streamTable(table, primaryKey = undefined) {
+    this.#requireSnapshot();
     if (!TABLES.has(table)) throw refusal('RMIG-E-SOURCE-FINGERPRINT', 'The requested table is not in the exact public v3.2 catalog.', { table });
     const catalogTable = sourceSpecFor('postgres').tables.find((item) => item.name === table);
     const order = primaryKey ?? catalogTable?.primary_key ?? [];
@@ -299,12 +330,14 @@ export class PostgresV32Adapter {
   }
 
   async rowCount(table) {
+    this.#requireSnapshot();
     if (!TABLES.has(table)) throw refusal('RMIG-E-SOURCE-FINGERPRINT', 'The requested table is not allowlisted.', { table });
     const result = await this.#query(`SELECT count(*)::text AS row_count FROM ${qualifiedTable(table)}`);
     return String(result.rows[0]?.row_count ?? '0');
   }
 
   async embeddingInventory() {
+    this.#requireSnapshot();
     try { return (await this.#query(POSTGRES_CATALOG_QUERIES.embeddings)).rows.map((row) => ({ source_type: row.source_type, row_count: String(row.row_count) })); }
     catch (error) {
       if (error?.code === '42P01') return [];

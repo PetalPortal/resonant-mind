@@ -70,6 +70,7 @@ it('schema-qualifies Postgres row and count reads and ignores hostile search_pat
     async query(text, values = []) {
       queries.push({ text, values });
       if (/SHOW transaction_read_only/u.test(text)) return { rows: [{ transaction_read_only: 'on' }] };
+      if (/current_setting\('TimeZone'\)/u.test(text)) return { rows: [{ timezone: 'UTC', datestyle: 'ISO, YMD', search_path: 'public', extra_float_digits: '1' }] };
       if (/^SELECT \*/u.test(text)) return { rows: [] };
       if (/count\(\*\)/u.test(text)) return { rows: [{ row_count: '0' }] };
       return { rows: [] };

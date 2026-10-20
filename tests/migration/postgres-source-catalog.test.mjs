@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  SOURCE_SESSION_OPTIONS,
+  SOURCE_SESSION_SETTINGS,
+  postgresClientConfig,
   buildPostgresCatalog,
   parseIndexDefinition,
   rfc3339FromPostgres,
@@ -26,7 +27,13 @@ describe('PostgreSQL timestamptz text as RFC 3339', () => {
 
 describe('PostgreSQL source session', () => {
   it('pins the settings that make catalog text and timestamps a function of the data alone', () => {
-    expect(SOURCE_SESSION_OPTIONS.split(' -c ').map((entry) => entry.replace(/^-c /u, '')).sort()).toEqual(['DateStyle=ISO,YMD', 'TimeZone=UTC', 'search_path=public']);
+    expect(SOURCE_SESSION_SETTINGS.map(({ name, value }) => `${name}=${value}`).sort()).toEqual(['DateStyle=ISO, YMD', 'TimeZone=UTC', 'extra_float_digits=1', 'search_path=public']);
+  });
+
+  it('sends no startup options, which a transaction-mode pooler may refuse', () => {
+    const config = postgresClientConfig('postgres://user:pw@host/db');
+    expect(Object.keys(config).sort()).toEqual(['connectionString', 'types']);
+    expect(config).not.toHaveProperty('options');
   });
 });
 
