@@ -43,3 +43,18 @@ export async function withScratchSource({ seed } = {}, use) {
     await admin.end();
   }
 }
+
+
+/** Runs `use(url)` against an empty scratch database (no schema at all), then drops it. */
+export async function withScratchDatabase(use) {
+  const database = `rmig_target_${process.pid}_${Date.now()}_${counter++}`;
+  const admin = new Client({ connectionString: adminUrl });
+  await admin.connect();
+  try {
+    await admin.query(`CREATE DATABASE ${quoteIdentifier(database)}`);
+    return await use(urlFor(database), database);
+  } finally {
+    await admin.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(database)} WITH (FORCE)`).catch(() => {});
+    await admin.end();
+  }
+}

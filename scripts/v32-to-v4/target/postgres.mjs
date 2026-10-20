@@ -37,28 +37,40 @@ export const TARGET_IDENTITY_QUERY = `
          inet_server_port()::text AS server_port,
          current_setting('server_version_num') AS server_version
 `;
+// Freshness is closed-world: every non-system schema, extension and application object must be accounted
+// for. The one thing it must not count is another session's temporary objects. pg_temp_N and
+// pg_toast_temp_N are the per-session temporary schemas, which PostgreSQL itself reserves (a user cannot
+// create a schema whose name starts with pg_), and a temporary table is dropped when its session ends,
+// so a concurrent session's temp table must not make an empty database look used. Nothing else is
+// hidden by that: a temp schema is ignored only for objects that are themselves temporary (a relation
+// with relpersistence 't'; functions and types that live in a temp schema), so a persistent relation
+// that somehow sat in one would still be listed and refused.
 export const TARGET_OBJECT_QUERY = `
   /* non_system_objects */
-  WITH user_schemas AS (
-    SELECT n.oid, n.nspname
+  WITH scanned_schemas AS (
+    SELECT n.oid, n.nspname::text AS nspname, (n.nspname ~ '^pg_temp_[0-9]+$' OR n.nspname ~ '^pg_toast_temp_[0-9]+$') AS is_temp
     FROM pg_catalog.pg_namespace n
-    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%'
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+  ), user_schemas AS (
+    SELECT oid, nspname FROM scanned_schemas WHERE NOT is_temp
   ), extension_list AS (
     SELECT e.extname, n.nspname AS schema_name
     FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
   ), app_objects AS (
     SELECT n.nspname AS schema_name, c.relname AS object_name, 'relation' AS object_kind
-    FROM user_schemas n JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid
+    FROM scanned_schemas n JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid
     WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+      AND NOT (n.is_temp AND c.relpersistence = 't')
       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = c.oid AND d.deptype = 'e')
     UNION ALL
     SELECT n.nspname, p.proname, 'routine'
-    FROM user_schemas n JOIN pg_catalog.pg_proc p ON p.pronamespace = n.oid
-    WHERE NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
+    FROM scanned_schemas n JOIN pg_catalog.pg_proc p ON p.pronamespace = n.oid
+    WHERE NOT n.is_temp
+      AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = p.oid AND d.deptype = 'e')
     UNION ALL
     SELECT n.nspname, t.typname, 'type'
-    FROM user_schemas n JOIN pg_catalog.pg_type t ON t.typnamespace = n.oid
-    WHERE t.typrelid = 0 AND t.typtype IN ('c', 'd', 'e')
+    FROM scanned_schemas n JOIN pg_catalog.pg_type t ON t.typnamespace = n.oid
+    WHERE NOT n.is_temp AND t.typrelid = 0 AND t.typtype IN ('c', 'd', 'e')
       AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d WHERE d.objid = t.oid AND d.deptype = 'e')
   )
   SELECT true AS inventory_complete,
