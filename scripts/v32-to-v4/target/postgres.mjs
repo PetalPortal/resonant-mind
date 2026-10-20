@@ -18,7 +18,7 @@ const REFERENCES = Object.freeze({
   daemon_proposals: { from_obs_id: ['observations'], to_obs_id: ['observations'], from_entity_id: ['entities'], to_entity_id: ['entities'] },
   thread_entities: { thread_id: ['threads'], entity_id: ['entities'] },
 });
-const SERIAL_TABLES = new Set(['entities', 'people', 'nodes', 'observations', 'observation_versions', 'relational_state', 'identity', 'journals', 'images', 'subconscious', 'daemon_proposals', 'orphan_observations', 'co_surfacing']);
+export const SERIAL_TABLES = new Set(['entities', 'people', 'nodes', 'observations', 'observation_versions', 'relational_state', 'identity', 'journals', 'images', 'subconscious', 'daemon_proposals', 'orphan_observations', 'co_surfacing']);
 
 function quoteIdentifier(value) { if (typeof value !== 'string' || !IDENTIFIER.test(value)) throw new TypeError('PostgreSQL identifier is not allowlisted.'); return `"${value}"`; }
 function qtable(schema, table) { return `${quoteIdentifier(schema)}.${quoteIdentifier(table)}`; }
@@ -89,7 +89,7 @@ export const TARGET_STATE_QUERY = `
   ORDER BY c.relkind, c.relname
 `;
 
-async function readIdentityInTransaction(client) { const result = await query(client, TARGET_IDENTITY_QUERY); return identityFromRow(result.rows?.[0] ?? {}); }
+export async function readIdentityInTransaction(client) { const result = await query(client, TARGET_IDENTITY_QUERY); return identityFromRow(result.rows?.[0] ?? {}); }
 export async function readTargetIdentity({ client } = {}) {
   await query(client, 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
   try { const readOnly = await query(client, 'SHOW transaction_read_only'); if (String(readOnly.rows?.[0]?.transaction_read_only ?? '').toLowerCase() !== 'on') throw refusal('RMIG-E-TARGET-SCHEMA', 'inspect-target', 'Target identity read could not prove a read-only transaction.'); return await readIdentityInTransaction(client); }
@@ -135,7 +135,7 @@ export async function inspectTarget({ client, sourceIdentity } = {}) {
 }
 
 function stagingName(migrationId, bundleHash) { const id = String(migrationId).replace(/[^A-Za-z0-9_]/gu, '_').slice(0, 28); return `rmig_${id}_${bundleHash.slice(0, 16)}`.slice(0, 63); }
-function stageContentSha256(members) { return canonicalSha256(Object.fromEntries(Object.entries(members ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([table, rows]) => [table, rows ?? []]))); }
+export function stageContentSha256(members) { return canonicalSha256(Object.fromEntries(Object.entries(members ?? {}).sort(([a], [b]) => a.localeCompare(b)).map(([table, rows]) => [table, rows ?? []]))); }
 function planEnvelope(plan, { migrationSetSha256: setHash, migratorVersion } = {}) {
   const { plan_sha256: _ignoredHash, plan_payload_sha256: _ignoredPayloadHash, migration_set_sha256: _ignoredSetHash, migrator_version: _ignoredVersion, ...payload } = plan ?? {};
   if (setHash !== undefined) payload.migration_set_sha256 = setHash;
@@ -205,7 +205,7 @@ async function readStagedMembers(client, schemaName, tables) {
   return members;
 }
 
-async function ledgerBinding(client) {
+export async function ledgerBinding(client) {
   const migrations = await readV4Migrations();
   const result = await query(client, 'SELECT version, checksum FROM public.schema_migrations ORDER BY version');
   const rows = result.rows ?? [];

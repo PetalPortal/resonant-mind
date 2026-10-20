@@ -116,4 +116,4 @@ export function buildValueMaps({ tables = {}, policy, skipRows = new Set() } = {
   losses.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b))); return { ...output, losses, hash: canonicalSha256({ ...output, losses }) };
 }
 export const compileValueMap = buildValueMaps;
-export { ENUMS };
+export { ENUMS, ALIASES, CONTEXTS, ENUM_FIELDS };

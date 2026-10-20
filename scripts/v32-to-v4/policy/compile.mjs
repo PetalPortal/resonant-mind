@@ -8,6 +8,7 @@ import { buildValueMaps } from '../transform/value-map.mjs';
 import { canonicalJson } from '../lib/canonical-json.mjs';
 import { sourceSpecFor } from '../lib/fingerprint.mjs';
 import { readFileSync } from 'node:fs';
+import { parseInstantMicros } from '../lib/instant.mjs';
 
 const MAP = JSON.parse(readFileSync(new URL('../spec/v3.2-to-v4-map.json', import.meta.url), 'utf8'));
 // migrations/postgres/0005d_routing_triggers.sql: COALESCE(NEW.salience, 'active'), COALESCE(NEW.primary_context, 'default'),
@@ -19,6 +20,22 @@ export const V4_ENTITY_NULL_SUBSTITUTES = Object.freeze([
   ['primary_context', "'default'"],
 ]);
 function refuse(summary, details = {}, code = 'RMIG-E-POLICY-UNRESOLVED') { throw new MigrationRefusal({ code, phase: 'compile-policy', summary, safe_details: details, report_path: null }); }
+// Version numbers follow (observation, changed_at, id). changed_at is compared as an instant, not as text:
+// '...00.123Z' and '...00.123456Z' differ in length, and as strings the later one sorts first. Ids that
+// are integers are compared as integers ('10' comes after '9'), anything else as text. A missing time
+// sorts first, and two missing times are equal.
+function compareIdentifiers(left, right) {
+  const a = Number(left); const b = Number(right);
+  if (Number.isSafeInteger(a) && Number.isSafeInteger(b) && String(a) === String(left) && String(b) === String(right)) return a < b ? -1 : a > b ? 1 : 0;
+  return String(left).localeCompare(String(right));
+}
+function compareInstants(left, right) {
+  if ((left === null || left === undefined) && (right === null || right === undefined)) return 0;
+  if (left === null || left === undefined) return -1;
+  if (right === null || right === undefined) return 1;
+  const a = parseInstantMicros(left); const b = parseInstantMicros(right);
+  return a < b ? -1 : a > b ? 1 : 0;
+}
 function rowsOf(bundle) { return extractBundleRows(bundle); }
 function choiceAction(choice) { return typeof choice === 'string' ? choice : choice?.action ?? choice?.type ?? choice?.kind ?? choice?.choice; }
 function decisionFor(policy, item) { return choiceForItem(policy, item); }
@@ -106,7 +123,7 @@ export function compilePolicy({ bundle, decisions, migrationId, bundleManifestSh
       if (selected !== undefined) linkMap[`${rowKey}:${item.field}`] = selected;
     }
   }
-  const versions = (tables.observation_versions ?? []).filter((row) => !ignoredRows.has(sourceKey('observation_versions', row))).map((row, index) => ({ row, hash: canonicalSha256(row), observationId: idMaps.byKey.get(`observations:${canonicalJson(row.observation_id).trim()}`)?.target_id ?? row.observation_id, changedAt: valueMaps.timestamps[`observation_versions:${canonicalSha256(row)}:changed_at`] ?? row.changed_at ?? null, id: row.id ?? index })).sort((a, b) => String(a.observationId).localeCompare(String(b.observationId)) || (a.changedAt === null ? -1 : b.changedAt === null ? 1 : String(a.changedAt).localeCompare(String(b.changedAt))) || String(a.id).localeCompare(String(b.id)));
+  const versions = (tables.observation_versions ?? []).filter((row) => !ignoredRows.has(sourceKey('observation_versions', row))).map((row, index) => ({ row, hash: canonicalSha256(row), observationId: idMaps.byKey.get(`observations:${canonicalJson(row.observation_id).trim()}`)?.target_id ?? row.observation_id, changedAt: valueMaps.timestamps[`observation_versions:${canonicalSha256(row)}:changed_at`] ?? row.changed_at ?? null, id: row.id ?? index })).sort((a, b) => compareIdentifiers(a.observationId, b.observationId) || compareInstants(a.changedAt, b.changedAt) || compareIdentifiers(a.id, b.id));
   let previousObservation = null; let version = 0; for (const entry of versions) { if (String(entry.observationId) !== String(previousObservation)) { previousObservation = entry.observationId; version = 0; } version += 1; versionNumbers[entry.hash] = version; }
   for (const mapping of mappings) {
     const rows = tables[mapping.source_table] ?? [];
@@ -118,7 +135,11 @@ export function compilePolicy({ bundle, decisions, migrationId, bundleManifestSh
       for (const dropped of mapping.dropped_fields ?? []) if (row[dropped.field] !== null && row[dropped.field] !== undefined) losses.push({ kind: 'dropped-field', source_table: mapping.source_table, source_row_sha256: rowHash, field: dropped.field, rationale: dropped.rationale });
       // v3.2 lets these entity columns be NULL; v4's own routing trigger fills them in (it is not something
       // this migrator chooses). The target therefore holds a value the source did not, and the audit says so.
-      if (mapping.source_table === 'entities') for (const [field, substitute] of V4_ENTITY_NULL_SUBSTITUTES) if (row[field] === null || row[field] === undefined) losses.push({ kind: 'null-replaced-by-v4-default', source_table: 'entities', source_row_sha256: rowHash, field, rationale: `The source row has no ${field} (NULL). v4's entity routing trigger stores ${substitute} in people/nodes, so the target holds a value the source did not.` });
+      // (a reviewed merge may give the survivor another source row's value for a field; that value is what counts)
+      if (mapping.source_table === 'entities') {
+        const effective = (field) => (idEntry?.field_values !== undefined && Object.hasOwn(idEntry.field_values, field) ? idEntry.field_values[field] : row[field]);
+        for (const [field, substitute] of V4_ENTITY_NULL_SUBSTITUTES) if (effective(field) === null || effective(field) === undefined) losses.push({ kind: 'null-replaced-by-v4-default', source_table: 'entities', source_row_sha256: rowHash, field, rationale: `The source row has no ${field} (NULL). v4's entity routing trigger stores ${substitute} in people/nodes, so the target holds a value the source did not.` });
+      }
       if (mapping.source_table === 'embeddings' && row.embedding !== null && row.embedding !== undefined) losses.push({ kind: 'legacy-vector-inventory-only', source_table: mapping.source_table, source_row_sha256: rowHash, field: 'embedding', rationale: 'legacy vectors are inventory-only and are never copied' });
       audit.push({ source_table: mapping.source_table, source_row_sha256: rowHash, target_tables: mapping.target_tables, status: 'mapped' });
     }

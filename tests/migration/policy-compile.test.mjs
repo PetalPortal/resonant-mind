@@ -63,4 +63,22 @@ describe('deterministic policy compilation and transformation', () => {
     // the loss travels into the staging plan the dry run and the receipts are bound to
     expect(transformRelational({ bundle, compiledPolicy: plan }).losses).toEqual(plan.losses);
   });
+
+  it('orders versions by the instant, not by the text of the timestamp, and by integer id on a tie', () => {
+    const bundle = { ...base, tables: {
+      entities: base.tables.entities,
+      observations: base.tables.observations,
+      observation_versions: [
+        // 05.123456 is later than 05.123 even though the shorter text sorts after the longer one as a string
+        { id: 20, observation_id: 30, content: 'later', changed_at: '2026-01-02T05:00:00.123456Z' },
+        { id: 21, observation_id: 30, content: 'earlier', changed_at: '2026-01-02T05:00:00.123Z' },
+        // same instant written two ways: integer id decides, so 9 comes before 10 (as text '10' comes first)
+        { id: 10, observation_id: 30, content: 'tie high id', changed_at: '2026-01-03T00:00:00Z' },
+        { id: 9, observation_id: 30, content: 'tie low id', changed_at: '2026-01-03T00:00:00.000Z' },
+      ],
+    } };
+    const plan = compilePolicy({ bundle, decisions: reviewed(bundle) });
+    const numbered = Object.fromEntries(transformRelational({ bundle, compiledPolicy: plan }).members.observation_versions.map((row) => [row.id, row.version_num]));
+    expect(numbered).toEqual({ 21: 1, 20: 2, 9: 3, 10: 4 });
+  });
 });
