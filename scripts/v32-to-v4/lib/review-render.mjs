@@ -24,6 +24,8 @@ const MAX_ROWS = 25;
 // code points that are invisible or change how text is laid out (controls, soft hyphen, zero-width and direction marks, line and paragraph separators)
 const INVISIBLE_RANGES = [[0x7f, 0x9f], [0xad, 0xad], [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x2069], [0xfeff, 0xfeff]];
 const isInvisible = (codePoint) => INVISIBLE_RANGES.some(([from, to]) => codePoint >= from && codePoint <= to);
+/** Whether text holds a C0 control or a code point that is invisible or changes layout; text a person or an agent types that is printed back (reviewed_by, bulk_rule) must not. */
+export const hasHiddenCharacters = (text) => [...String(text)].some((char) => { const code = char.codePointAt(0); return code < 0x20 || isInvisible(code); });
 const BACKSLASH_U = String.fromCharCode(92) + 'u';
 
 /** A value as the owner will read it: JSON text, invisible characters written out, cut at `max` characters with a count. */

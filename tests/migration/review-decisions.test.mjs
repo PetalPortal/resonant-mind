@@ -284,11 +284,23 @@ describe('who stated each choice is recorded, and a choice without it is refused
   it('refuses a statement on an item that has no choice, and a malformed bulk rule', () => {
     const noChoice = apply('stated-nochoice', state.draft.items.map((item, index) => (index === 0 ? { ...item, stated_by: 'owner' } : { ...item, choice: CHOICES[item.type], stated_by: 'owner' })), ['--json']);
     expect(noChoice.status).toBe(2);
-    for (const rule of ['', ' padded ', 'x'.repeat(501), 'two\nlines', 42]) {
+    // A rule is printed back (apply-decisions, the report, status), so nothing in it may make a line read otherwise:
+    // no direction override, zero-width or other invisible character, the same set the review writes out.
+    for (const rule of ['', ' padded ', 'x'.repeat(501), 'two\nlines', 42, 'rename every ‮etaticilpud', 'merge​ all', 'keep ⁦the⁩ first', 'soft­hyphen']) {
       const result = apply('stated-rule', chosen((_item, index) => ({ stated_by: 'owner', bulk_rule: rule })), ['--json']);
       expect(result.status, String(rule).slice(0, 20)).toBe(2);
       expect(JSON.parse(result.stdout).summary).toContain('bulk_rule');
       rmSync(join(work, 'stated-rule.json'), { force: true });
+    }
+  }, 240_000);
+
+  it('refuses a reviewer name with a control, invisible or direction-changing character', () => {
+    writeFileSync(join(work, 'reviewer.json'), JSON.stringify({ ...state.draft, items: chosen(() => ({ stated_by: 'owner' })) }));
+    for (const reviewer of ['The ‮Owner', 'The​Owner', 'The ⁨Owner⁩', 'The\u0007Owner']) {
+      const result = runCli(['apply-decisions', '--bundle', join(work, 'stated.rmigrate'), '--passphrase-file', join(work, 'stated-passphrase'), '--decisions', join(work, 'reviewer.json'), '--reviewed-by', reviewer, '--out', join(work, 'reviewer-reviewed.json'), '--json']);
+      expect(result.status, JSON.stringify(reviewer)).toBe(2);
+      expect(JSON.parse(result.stdout).summary).toContain('reviewed_by');
+      expect(existsSync(join(work, 'reviewer-reviewed.json'))).toBe(false);
     }
   }, 240_000);
 

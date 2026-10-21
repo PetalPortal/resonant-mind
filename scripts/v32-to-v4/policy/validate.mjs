@@ -2,6 +2,7 @@ import { canonicalJson } from '../lib/canonical-json.mjs';
 import { canonicalSha256 } from '../lib/hash.mjs';
 import { assertMigrationId, assertTimestamp, assertPlainData, FORMAT_VERSION } from '../lib/contracts.mjs';
 import { decisionManifestHash, generateDecisionItems, bundleHash } from './generate.mjs';
+import { hasHiddenCharacters } from '../lib/review-render.mjs';
 
 const HASH = /^[0-9a-f]{64}$/u;
 const SAFE_ID = new Set(['string', 'number']);
@@ -23,7 +24,7 @@ function keysOnly(value, allowed, label) {
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new TypeError(`${label} contains unsupported key ${key}.`);
 }
 function safeText(value, label) {
-  if (typeof value !== 'string' || value.length === 0 || value !== value.trim() || /[\u0000-\u001f\u007f]/u.test(value)) throw new TypeError(`${label} must be safe text.`);
+  if (typeof value !== 'string' || value.length === 0 || value !== value.trim() || hasHiddenCharacters(value)) throw new TypeError(`${label} must be safe text, with no control, invisible or direction-changing characters.`);
 }
 function choiceValid(choice, item) {
   if (typeof choice === 'string') {
@@ -77,7 +78,7 @@ function validateItem(item, index, reviewed) {
     if (!STATED_BY.includes(item.stated_by)) throw new TypeError(`items[${index}] has a choice but no stated_by (owner, or owner-accepted-agent-suggestion): a choice must say who stated it.`);
     if (Object.hasOwn(item, 'bulk_rule')) {
       const rule = item.bulk_rule;
-      if (typeof rule !== 'string' || rule.length === 0 || rule !== rule.trim() || rule.length > BULK_RULE_MAX_LENGTH || /[\u0000-\u001f\u007f]/u.test(rule)) throw new TypeError(`items[${index}].bulk_rule must be the owner's rule as one line of text, at most ${BULK_RULE_MAX_LENGTH} characters.`);
+      if (typeof rule !== 'string' || rule.length === 0 || rule !== rule.trim() || rule.length > BULK_RULE_MAX_LENGTH || hasHiddenCharacters(rule)) throw new TypeError(`items[${index}].bulk_rule must be the owner's rule as one line of text, at most ${BULK_RULE_MAX_LENGTH} characters, with no control, invisible or direction-changing characters.`);
     }
   } else if (Object.hasOwn(item, 'choice') || Object.hasOwn(item, 'stated_by') || Object.hasOwn(item, 'bulk_rule')) throw new TypeError('Draft decision manifests must not contain choices.');
 }
