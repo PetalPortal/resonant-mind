@@ -454,6 +454,55 @@ export function literalDefault(expression) {
 }
 
 /**
+ * What a default expression is, when it is one of the two the validator can evaluate itself, from the text the
+ * catalog prints for it (never run against the target):
+ *  - { kind: 'import-time' }: now(), CURRENT_TIMESTAMP and transaction_timestamp() (optionally cast to
+ *    timestamptz). All three are the start time of the transaction, and the whole import is one transaction, so a
+ *    column filled by one of them holds exactly the import's `imported_at` (the receipt row is stamped the same
+ *    way). statement_timestamp(), clock_timestamp(), CURRENT_TIMESTAMP(n) and every other form are not this.
+ *  - { kind: 'sequence', schema, name }: nextval('seq'::regclass); the value must be an integer within the
+ *    sequence's own range.
+ * Anything else is { kind: null }: it cannot be evaluated here.
+ */
+export function evaluableDefault(expression) {
+  if (typeof expression !== 'string') return { kind: null };
+  const text = expression.trim().replace(/::(?:timestamp with time zone|timestamptz)$/iu, '').trim();
+  if (/^(?:now\(\)|current_timestamp|transaction_timestamp\(\))$/iu.test(text)) return { kind: 'import-time' };
+  const call = /^nextval\('((?:[^']|'')*)'(?:::regclass)?\)$/iu.exec(text);
+  if (call) {
+    const name = parseQualifiedName(call[1].replaceAll("''", "'"));
+    if (name !== null) return { kind: 'sequence', ...name };
+  }
+  return { kind: null };
+}
+// 'name', 'schema.name', '"Quoted"."Names"' -> { schema, name } (an unqualified name is in public). Null when it is not one.
+function parseQualifiedName(text) {
+  const parts = []; let index = 0;
+  while (index <= text.length) {
+    if (text[index] === '"') {
+      let value = ''; index += 1;
+      for (;;) {
+        if (index >= text.length) return null;
+        if (text[index] === '"') { if (text[index + 1] === '"') { value += '"'; index += 2; continue; } index += 1; break; }
+        value += text[index]; index += 1;
+      }
+      parts.push(value);
+    } else {
+      const match = /^[a-z_][a-z0-9_$]*/u.exec(text.slice(index));
+      if (match === null) return null;
+      parts.push(match[0]); index += match[0].length;
+    }
+    if (index === text.length) break;
+    if (text[index] !== '.') return null;
+    index += 1;
+  }
+  if (parts.length === 1) return { schema: 'public', name: parts[0] };
+  if (parts.length === 2) return { schema: parts[0], name: parts[1] };
+  return null;
+}
+const asInteger = (value) => { try { if (typeof value === 'bigint') return value; if (typeof value === 'number') return Number.isSafeInteger(value) ? BigInt(value) : null; if (typeof value === 'string' && /^-?\d+$/u.test(value)) return BigInt(value); } catch { /* not an integer */ } return null; };
+
+/**
  * Columns a released v4 trigger fills in when the plan row leaves them out, with the derivation the trigger
  * applies (0006_identity_kind.sql: identity.kind is the first dotted segment of section, other characters
  * folded to underscores, lower-cased). The validator re-derives the value itself, in the same order of
@@ -471,8 +520,13 @@ export const TRIGGER_DERIVED = Object.freeze({
  * the row (TRIGGER_DERIVED), which must be exactly what that trigger derives. Anything else is a value nobody planned. With no
  * knowledge of the column's default, any non-NULL value is unplanned. Returns the state:
  * 'absent' | 'default' | 'computed' | 'derived' | 'default-expression-not-evaluated' | 'unplanned-value' | 'default-differs' | 'derived-value-differs'.
+ *
+ * now() / CURRENT_TIMESTAMP / transaction_timestamp() are evaluated as exactly `importedAt` (the import's one
+ * transaction) and nextval(...) as an integer within the sequence's range (`sequences`, keyed 'schema.name',
+ * each { min, max }); anything else the catalog prints as a function call is 'default-expression-not-evaluated'
+ * and is never accepted as ready (comparePlanToTarget makes it a finding).
  */
-export function unstatedCellState({ table, column, row, dbValue = row?.[column], columnInfo }) {
+export function unstatedCellState({ table, column, row, dbValue = row?.[column], columnInfo, importedAt, sequences }) {
   if (dbValue === null || dbValue === undefined) return 'absent';
   const derive = TRIGGER_DERIVED[table]?.[column];
   if (derive !== undefined) return derive(row) === dbValue ? 'derived' : 'derived-value-differs';
@@ -480,7 +534,7 @@ export function unstatedCellState({ table, column, row, dbValue = row?.[column],
   if (columnInfo.generated === true || columnInfo.identity === true) return 'computed';
   if (columnInfo.default === null || columnInfo.default === undefined) return 'unplanned-value';
   const parsed = literalDefault(columnInfo.default);
-  if (!parsed.literal) return 'default-expression-not-evaluated';
+  if (!parsed.literal) return evaluatedExpressionState({ expression: columnInfo.default, dbValue, importedAt, sequences });
   if (parsed.value === null) return 'default-differs';
   let same;
   if (parsed.numeric) same = Number(dbValue) === parsed.value;
@@ -488,6 +542,22 @@ export function unstatedCellState({ table, column, row, dbValue = row?.[column],
   else if (typeof dbValue === 'string') same = dbValue === parsed.value || sameJson(dbValue, parsed.value);
   else same = false;
   return same ? 'default' : 'default-differs';
+}
+
+function evaluatedExpressionState({ expression, dbValue, importedAt, sequences }) {
+  const evaluable = evaluableDefault(expression);
+  if (evaluable.kind === 'import-time') {
+    if (importedAt === null || importedAt === undefined) return 'default-expression-not-evaluated';
+    let micros = null; try { micros = typeof dbValue === 'string' ? parseInstantMicros(dbValue) : null; } catch { micros = null; }
+    return micros !== null && micros === importedAt ? 'default' : 'default-differs';
+  }
+  if (evaluable.kind === 'sequence') {
+    const range = sequences?.[`${evaluable.schema}.${evaluable.name}`];
+    if (range === undefined || range === null) return 'default-expression-not-evaluated';
+    const value = asInteger(dbValue);
+    return value !== null && value >= BigInt(range.min) && value <= BigInt(range.max) ? 'default' : 'default-differs';
+  }
+  return 'default-expression-not-evaluated';
 }
 
 /** The target columns of one row: those the catalog lists for the table and those the row carries (a view has no catalog entry). */
@@ -502,7 +572,8 @@ export function targetColumns(columnTypes, table, row) {
  * rows are insert-shaped and need not carry every v4 column, but a value in a column the plan did not state
  * is only acceptable if it is NULL or the database's own default. Rows may not be missing, extra or duplicated.
  */
-export function comparePlanToTarget({ plan, targetTables, columnTypes = {}, columnDefaults = {}, importedAt }) {
+export function comparePlanToTarget({ plan, targetTables, columnTypes = {}, columnDefaults = {}, importedAt, sequences }) {
+  const unevaluated = new Map(); // 'table.column' -> cells
   const findings = new Findings();
   const tables = {};
   let cells = 0;
@@ -531,12 +602,17 @@ export function comparePlanToTarget({ plan, targetTables, columnTypes = {}, colu
       for (const column of targetColumns(columnTypes, table, actual)) {
         if (planned[column] !== undefined) continue;
         cells += 1; summary.cells_compared += 1; summary.unstated_cells_compared += 1;
-        const state = unstatedCellState({ table, column, row: actual, columnInfo: columnDefaults[table]?.[column] });
+        const state = unstatedCellState({ table, column, row: actual, columnInfo: columnDefaults[table]?.[column], importedAt, sequences });
         if (state === 'unplanned-value' || state === 'default-differs' || state === 'derived-value-differs') findings.add('target-column-not-in-plan', { table, ...safeId(planned.id), column, difference: state });
-        else if (state === 'default-expression-not-evaluated') summary.default_expressions_not_evaluated += 1;
+        else if (state === 'default-expression-not-evaluated') {
+          summary.default_expressions_not_evaluated += 1;
+          unevaluated.set(`${table}.${column}`, (unevaluated.get(`${table}.${column}`) ?? 0) + 1);
+          findings.add('default-expression-not-evaluated', { table, ...safeId(planned.id), column });
+        }
       }
     }
     for (const [key, row] of byId) if (!seen.has(key)) findings.add('target-row-not-in-plan', { table, ...safeId(row.id) });
   }
-  return { findings, tables, cells_compared: cells };
+  const unevaluatedDefaults = [...unevaluated].sort(([a], [b]) => a.localeCompare(b)).map(([key, count]) => ({ table: key.slice(0, key.indexOf('.')), column: key.slice(key.indexOf('.') + 1), cells: count }));
+  return { findings, tables, cells_compared: cells, unevaluated_defaults: unevaluatedDefaults };
 }

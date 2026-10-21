@@ -1,3 +1,5 @@
+import { generateKeyPairSync, sign } from 'node:crypto';
+import { canonicalJson } from '../../scripts/v32-to-v4/lib/canonical-json.mjs';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -70,10 +72,14 @@ describe('append-only checkpoints and final reconciliation', () => {
     if (env === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = env;
   });
 
-  it('reports readiness only when relational and external receipts reconcile', () => {
+  it('never reports ready or complete from an offline comparison of snapshots, however well every receipt reconciles', () => {
     const imagePlan = buildImageInventory({ images: [], migrationId: 'rmig_reconcile_01' });
-    const imageReceipt = { format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: imagePlan.migration_id, plan_sha256: imagePlan.plan_sha256, entries: [] };
+    // a receipt must be signed here: an offline comparison cannot be told that the tool looked at any object
+    const keys = generateKeyPairSync('ed25519');
+    const unsignedBody = { format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: imagePlan.migration_id, plan_sha256: imagePlan.plan_sha256, entries: [] };
+    const imageReceipt = { ...unsignedBody, signature: { algorithm: 'ed25519', key_id: 'test-key', value: sign(null, Buffer.from(canonicalJson(unsignedBody)), keys.privateKey).toString('base64') } };
     imageReceipt.receipt_sha256 = canonicalSha256(imageReceipt);
+    const trustedPublicKey = keys.publicKey.export({ type: 'spki', format: 'pem' });
     const reembedPlan = buildReembedPlan({ members: {}, migrationId: 'rmig_reconcile_01' });
     const reembedReceipts = { format_version: 1, migration_id: reembedPlan.migration_id, plan_sha256: reembedPlan.plan_sha256, receipts: [] };
     const rowset = { observations: [{ id: 1, content: 'x' }] };
@@ -81,7 +87,15 @@ describe('append-only checkpoints and final reconciliation', () => {
     const targetIdentity = { database_identity_sha256: 'd'.repeat(64) };
     const dryRunReceipt = buildDryRunReport({ plan, targetIdentity, migrationSetSha256: '1'.repeat(64), migratorVersion: '4.0.1', stageContentSha256: canonicalSha256({}), targetStateSha256: canonicalSha256({}) });
     const importReceipt = buildImportReceipt({ plan, dryRun: dryRunReceipt, targetIdentity, insertedRows: 0 });
-    const report = reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'test-model', expectedDimension: 3, source: { ...rowset, migration_id: imagePlan.migration_id }, exported: rowset, staged: rowset, target: rowset, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt });
-    expect(report.status).toBe('ready-for-cutover'); expect(determineMigrationStatus(report)).toBe('ready-for-cutover');
+    const report = reconcileMigration({ trustedPublicKey, expectedModel: 'test-model', expectedDimension: 3, source: { ...rowset, migration_id: imagePlan.migration_id }, exported: rowset, staged: rowset, target: rowset, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt });
+    // every check passed, and the most it can say is that a person has to review it
+    expect(report).toMatchObject({ violations: [], images_complete: true, reembed_complete: true, relational_reconciliation_complete: true, validation_mode: 'offline-snapshots', status: 'review-required', status_capped: 'ready-for-cutover' });
+    expect(determineMigrationStatus(report)).toBe('review-required');
+    // and no operator evidence lifts it
+    expect(determineMigrationStatus(report, { operatorCutoverEvidence: undefined })).toBe('review-required');
+    // the caller can no longer assert that the tool observed the objects: an unsigned receipt is refused here
+    const unsigned = reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'test-model', expectedDimension: 3, source: { ...rowset, migration_id: imagePlan.migration_id }, exported: rowset, staged: rowset, target: rowset, imagePlan, imageReceipt: { ...unsignedBody, receipt_sha256: canonicalSha256(unsignedBody) }, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt });
+    expect(unsigned.status).toBe('refused');
+    expect(unsigned.violations.map(({ check }) => check)).toContain('external-image-receipt-invalid');
   });
 });

@@ -80,9 +80,9 @@ describe('synthetic D1/SQLite v3.2 to v4 operator path', () => {
     writeFileSync(join(pictureSource, 'images', 'synthetic.png'), Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from('a synthetic picture')]));
     const imageReceipt = await copyImagePlan({ plan: imagePlan, sourceStore: new FilesystemObjectStore(pictureSource), targetStore: new FilesystemObjectStore(pictureTarget) });
     expect(imageReceipt.entries[0]).toMatchObject({ mime: 'image/png', verified: true, source_fingerprint: { sha256: imageReceipt.entries[0].sha256, size: imageReceipt.entries[0].size, mime: 'image/png' } });
-    const imageFingerprints = validateImageReceipt({ plan: imagePlan, receipt: imageReceipt, requireSignature: false }).fingerprints;
+    const imageFingerprints = validateImageReceipt({ plan: imagePlan, receipt: imageReceipt, requireSignature: false }).fingerprints; // (only to feed the re-embedding check below; validate never accepts an unsigned receipt on this alone)
     const reembedPlan = plan.reembed_jobs;
-    const missingExternal = () => reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'synthetic-model', expectedDimension: 3, source: bundle.tables, exported: bundle.tables, staged: bundle.tables, target: bundle.tables, imagePlan, imageReceipt, reembedPlan, migrationId: plan.migration_id });
+    const missingExternal = () => reconcileMigration({ expectedModel: 'synthetic-model', expectedDimension: 3, source: bundle.tables, exported: bundle.tables, staged: bundle.tables, target: bundle.tables, imagePlan, imageReceipt, reembedPlan, migrationId: plan.migration_id });
     expect(missingExternal).not.toThrow();
     expect(missingExternal().status).toBe('refused');
 
@@ -92,8 +92,10 @@ describe('synthetic D1/SQLite v3.2 to v4 operator path', () => {
     const targetIdentity = { database_identity_sha256: 'c'.repeat(64) };
     const dryRunReceipt = buildDryRunReport({ plan, targetIdentity, migrationSetSha256: 'd'.repeat(64), migratorVersion: '4.0.1', stageContentSha256: canonicalSha256(plan.members), targetStateSha256: canonicalSha256({ fresh: true }) });
     const importReceipt = buildImportReceipt({ plan, dryRun: dryRunReceipt, targetIdentity, insertedRows: Object.values(plan.members).reduce((sum, rows) => sum + rows.length, 0) });
-    const ready = reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'synthetic-model', expectedDimension: 3, source: bundle.tables, exported: bundle.tables, staged: bundle.tables, target: bundle.tables, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt, migrationId: plan.migration_id });
-    expect(ready.status).toBe('ready-for-cutover');
+    // This route has no live target, so it cannot show the ready state: an offline comparison of snapshots never reaches it, whatever it is handed
+    // (the ready state is asserted through validate itself, against a live target, in cli-flow.integration, e2e-postgres and e2e-postgres-rich).
+    const offline = reconcileMigration({ expectedModel: 'synthetic-model', expectedDimension: 3, source: bundle.tables, exported: bundle.tables, staged: bundle.tables, target: bundle.tables, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt, importReceipt, migrationId: plan.migration_id });
+    expect(offline.status).not.toMatch(/^(ready-for-cutover|complete-operator-attested)$/u);
 
     const leftovers = readdirSync(root).filter((name) => name.includes('incomplete') || name.endsWith('.tmp'));
     expect(leftovers).toEqual([]);

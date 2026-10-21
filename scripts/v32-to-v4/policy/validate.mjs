@@ -8,6 +8,12 @@ const SAFE_ID = new Set(['string', 'number']);
 const ITEM_REQUIRED = ['decision_id', 'type', 'source_table', 'source_id', 'source_row_sha256', 'reason', 'allowed_choices'];
 const ITEM_OPTIONAL = new Set(['field', 'target_table', 'target_id', 'expected_shape', 'observed_value_sha256', 'endpoint_sha256', 'collision_ids', 'required_choice_fields', 'review_id']);
 const TOP_KEYS = new Set(['format_version', 'manifest_type', 'migration_id', 'bundle_manifest_sha256', 'reviewed', 'generated_at', 'reviewed_by', 'reviewed_at', 'items', 'manifest_sha256']);
+// Who stated each choice. 'owner': the owner said it. 'owner-accepted-agent-suggestion': it began as a suggestion made
+// by an agent that the owner then accepted. There is no value for a choice the agent made on its own: such a choice is
+// not recorded at all (the runbook: an owner who delegates has not chosen). `bulk_rule` is the owner's own words for a
+// rule that settled several items at once, kept verbatim.
+export const STATED_BY = Object.freeze(['owner', 'owner-accepted-agent-suggestion']);
+export const BULK_RULE_MAX_LENGTH = 500;
 const WILDCARDS = new Set(['*', 'all', 'accept-all', 'accept_all', 'any', 'unknown']);
 function object(value, label) {
   if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError(`${label} must be a plain object.`);
@@ -54,7 +60,7 @@ function choiceValid(choice, item) {
 function validateItem(item, index, reviewed) {
   object(item, `items[${index}]`);
   const allowed = new Set([...ITEM_REQUIRED, ...ITEM_OPTIONAL]);
-  if (reviewed) allowed.add('choice');
+  if (reviewed) { allowed.add('choice'); allowed.add('stated_by'); allowed.add('bulk_rule'); }
   keysOnly(item, allowed, `items[${index}]`);
   for (const key of ITEM_REQUIRED) if (!Object.hasOwn(item, key)) throw new TypeError(`items[${index}] is missing ${key}.`);
   if (!HASH.test(item.decision_id) || !HASH.test(item.source_row_sha256)) throw new TypeError(`items[${index}] has invalid decision or row hash.`);
@@ -65,8 +71,15 @@ function validateItem(item, index, reviewed) {
   if (Object.hasOwn(item, 'observed_value_sha256') && !HASH.test(item.observed_value_sha256)) throw new TypeError('Observed value hash is invalid.');
   if (Object.hasOwn(item, 'endpoint_sha256') && !HASH.test(item.endpoint_sha256)) throw new TypeError('Endpoint hash is invalid.');
   if (Object.hasOwn(item, 'collision_ids') && (!Array.isArray(item.collision_ids) || item.collision_ids.length < 2)) throw new TypeError('Collision IDs must enumerate at least two IDs.');
-  if (reviewed) { if (!Object.hasOwn(item, 'choice')) throw new TypeError(`items[${index}] is unresolved.`); choiceValid(item.choice, item); }
-  else if (Object.hasOwn(item, 'choice')) throw new TypeError('Draft decision manifests must not contain choices.');
+  if (reviewed) {
+    if (!Object.hasOwn(item, 'choice')) throw new TypeError(`items[${index}] is unresolved.`);
+    choiceValid(item.choice, item);
+    if (!STATED_BY.includes(item.stated_by)) throw new TypeError(`items[${index}] has a choice but no stated_by (owner, or owner-accepted-agent-suggestion): a choice must say who stated it.`);
+    if (Object.hasOwn(item, 'bulk_rule')) {
+      const rule = item.bulk_rule;
+      if (typeof rule !== 'string' || rule.length === 0 || rule !== rule.trim() || rule.length > BULK_RULE_MAX_LENGTH || /[\u0000-\u001f\u007f]/u.test(rule)) throw new TypeError(`items[${index}].bulk_rule must be the owner's rule as one line of text, at most ${BULK_RULE_MAX_LENGTH} characters.`);
+    }
+  } else if (Object.hasOwn(item, 'choice') || Object.hasOwn(item, 'stated_by') || Object.hasOwn(item, 'bulk_rule')) throw new TypeError('Draft decision manifests must not contain choices.');
 }
 export function validateDecisionManifest(value, { bundleManifestSha256, expectedItems, bundle } = {}) {
   object(value, 'Decision manifest');
@@ -93,12 +106,33 @@ export function validateDecisionManifest(value, { bundleManifestSha256, expected
       if (expected.size !== ids.size || [...expected].some((id) => !ids.has(id))) throw new TypeError('Reviewed policy has missing or extra decisions.');
       for (const item of value.items) {
         const expectedItem = expectedById.get(item.decision_id);
-        const comparable = (candidate) => { const copy = { ...candidate }; delete copy.decision_id; delete copy.choice; return copy; };
+        const comparable = (candidate) => { const copy = { ...candidate }; delete copy.decision_id; delete copy.choice; delete copy.stated_by; delete copy.bulk_rule; return copy; };
         if (canonicalJson(comparable(item)) !== canonicalJson(comparable(expectedItem))) throw new TypeError(`Decision ${item.decision_id} is stale or does not match the verified source row.`);
       }
     }
   } else if (value.reviewed_by !== null || value.reviewed_at !== null) throw new TypeError('Unreviewed decision manifests must have null review metadata.');
   return value;
+}
+/**
+ * Who stated each choice of a reviewed manifest, for the compiled policy and the report: the count by who stated it,
+ * the owner's bulk rules verbatim with the number of items each settled, and the ids of the items whose choice began as
+ * an agent's suggestion. Holds no memory content: only ids, counts and the owner's own rule text.
+ */
+export function summarizeStatements(decisions) {
+  const counts = Object.fromEntries(STATED_BY.map((name) => [name, 0]));
+  const rules = new Map();
+  const accepted = [];
+  for (const item of decisions?.items ?? []) {
+    if (!Object.hasOwn(item, 'choice')) continue;
+    counts[item.stated_by] = (counts[item.stated_by] ?? 0) + 1;
+    if (item.stated_by === 'owner-accepted-agent-suggestion') accepted.push(item.decision_id);
+    if (typeof item.bulk_rule === 'string') rules.set(item.bulk_rule, (rules.get(item.bulk_rule) ?? 0) + 1);
+  }
+  return {
+    stated_by: counts,
+    bulk_rules: [...rules].sort(([a], [b]) => a.localeCompare(b)).map(([rule, items]) => ({ rule, items })),
+    suggestions_accepted: accepted.sort(),
+  };
 }
 export function assertReviewedDecisionManifest(value, options = {}) { validateDecisionManifest(value, options); if (!value.reviewed) throw new TypeError('Decision manifest is not reviewed.'); return value; }
 export function decisionContentHash(value) { const { manifest_sha256: _ignored, ...rest } = value; return canonicalSha256(rest); }

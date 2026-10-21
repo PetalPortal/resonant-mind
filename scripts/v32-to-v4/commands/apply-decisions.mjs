@@ -1,5 +1,5 @@
 import { decisionManifestHash, generateDecisionItems, loadVerifiedBundle } from '../policy/generate.mjs';
-import { validateDecisionManifest } from '../policy/validate.mjs';
+import { summarizeStatements, validateDecisionManifest } from '../policy/validate.mjs';
 import { MigrationRefusal } from '../lib/refusal.mjs';
 import { parseOptions, readJsonFile, refuseArgument, writeJsonNew } from './shared.mjs';
 
@@ -57,10 +57,13 @@ export function applyDecisionsCommand({ bundlePath, decisionsPath, reviewedBy, o
     reviewed_at: now,
     items: reviewed.items.length,
     choices: Object.fromEntries(Object.entries(byAction).sort(([a], [b]) => a.localeCompare(b))),
+    ...summarizeStatements(reviewed),
     out: outPath,
   };
 }
 
 export function humanApplyDecisionsResult(result) {
-  return `apply-decisions: complete; items=${result.items}; reviewed_by=${JSON.stringify(result.reviewed_by)}; manifest_sha256=${result.manifest_sha256}; out=${result.out}\n`;
+  const stated = Object.entries(result.stated_by ?? {}).map(([name, count]) => `${name}=${count}`).join(',');
+  const rules = (result.bulk_rules ?? []).map(({ rule, items }) => `${items} item(s) by the rule ${JSON.stringify(rule)}`).join('; ');
+  return `apply-decisions: complete; items=${result.items}; reviewed_by=${JSON.stringify(result.reviewed_by)}; stated_by ${stated}${rules === '' ? '' : `; bulk rules: ${rules}`}; manifest_sha256=${result.manifest_sha256}; out=${result.out}\n`;
 }

@@ -26,7 +26,7 @@ const bundle = {
 
 function plan() {
   const manifest = generateDecisionManifest(bundle, { now: '2026-09-20T00:00:00.000Z' });
-  for (const item of manifest.items) item.choice = 'exclude-row';
+  for (const item of manifest.items) { item.choice = 'exclude-row'; item.stated_by = 'owner'; }
   manifest.reviewed = true; manifest.reviewed_by = 'test-reviewer'; manifest.reviewed_at = '2026-09-20T00:00:00.000Z'; manifest.manifest_sha256 = decisionManifestHash(manifest);
   const compiled = compilePolicy({ bundle, decisions: manifest });
   return transformRelational({ bundle, compiledPolicy: compiled });
@@ -62,13 +62,14 @@ const observedObjects = (imagePlan, change = {}) => ({ observed: Object.fromEntr
 const EMBEDDING_MODEL = 'test-model';
 const EMBEDDING_DIMENSION = 3;
 // with the evidence the operator would supply: the tool looked at the objects, and states the embedding model
-const defaults = (relational) => ({ imageObjects: observedObjects(relational.image_inventory), embeddingModel: EMBEDDING_MODEL });
+// (and the receipt carries the keyed seal a filesystem copy makes; whether it verifies is judged by validate, which passes the verdict)
+const defaults = (relational) => ({ imageObjects: observedObjects(relational.image_inventory), imageReceiptSeal: 'valid', embeddingModel: EMBEDDING_MODEL });
 
-const run = ({ relational, files, tables = targetFor(relational), columnTypes = {}, columnDefaults = {}, embeddingDimension = EMBEDDING_DIMENSION }) => {
+const run = ({ relational, files, tables = targetFor(relational), columnTypes = {}, columnDefaults = {}, embeddingDimension = EMBEDDING_DIMENSION, importedAt = null, sequenceRanges }) => {
   const findings = new Findings();
   const evidence = checkExternalEvidence({
     derived: { members: relational.members, imageInventory: relational.image_inventory, reembedPlan: relational.reembed_jobs },
-    files: { ...defaults(relational), ...files }, migrationId: MIGRATION_ID, live: { tables, columnTypes, columnDefaults, embeddingDimension, importedAt: null }, findings,
+    files: { ...defaults(relational), ...files }, migrationId: MIGRATION_ID, live: { tables, columnTypes, columnDefaults, embeddingDimension, importedAt, sequenceRanges }, findings,
   });
   return { evidence, findings };
 };
@@ -175,10 +176,20 @@ describe('an image receipt is signed unless the tool re-hashed the objects itsel
     expect(evidence.images.signature_required).toBe(true);
   });
 
-  it('completes unsigned only where the tool re-read every object, and says so', () => {
+  it('completes unsigned only where the tool re-read every object and the receipt carries the seal of the copy, and says so', () => {
+    // this plan states every value (a source that stores them), so the objects are held to the plan itself
     const { evidence, findings } = outcome({ imageReceipt: imageReceipt(imagePlan) });
     expect(findings.counts).toEqual({});
-    expect(evidence.images).toMatchObject({ complete: true, basis: 'tool-rehashed-objects', objects_rehashed_by_tool: true, receipt_signature_verified: false, signature_required: false });
+    expect(evidence.images).toMatchObject({ complete: true, basis: 'tool-rehashed-target-against-plan', objects_rehashed_by_tool: true, source_objects_rehashed_by_tool: false, receipt_seal: 'valid', receipt_signature_verified: false, signature_required: false });
+    // no seal, or a seal that cannot be checked, leaves the images pending; a seal that does not verify is a finding
+    for (const [seal, reason] of [['absent', 'receipt-not-sealed'], ['unverifiable', 'receipt-seal-needs-the-passphrase-file']]) {
+      const pending = outcome({ imageReceipt: imageReceipt(imagePlan), imageReceiptSeal: seal });
+      expect(pending.findings.counts, seal).toEqual({});
+      expect(pending.evidence.images, seal).toMatchObject({ complete: false, basis: 'not-complete', pending_reason: reason, receipt_seal: seal });
+    }
+    const invalid = outcome({ imageReceipt: imageReceipt(imagePlan), imageReceiptSeal: 'invalid' });
+    expect(invalid.findings.counts).toEqual({ 'image-receipt-seal-invalid': 1 });
+    expect(invalid.evidence.images.complete).toBe(false);
   });
 
   it('completes with a valid signature on a key the operator trusts, and calls that attested, not verified', () => {
@@ -203,14 +214,10 @@ describe('an image receipt is signed unless the tool re-hashed the objects itsel
   });
 
   it('the receipt check itself defaults to requiring a signature', async () => {
-    const { validateImageReceipt, imageSignatureRequired } = await import('../../scripts/v32-to-v4/external/images.mjs');
+    const { validateImageReceipt } = await import('../../scripts/v32-to-v4/external/images.mjs');
     expect(() => validateImageReceipt({ plan: imagePlan, receipt: imageReceipt(imagePlan) })).toThrow(/Ed25519|signature/u);
     expect(() => validateImageReceipt({ plan: imagePlan, receipt: imageReceipt(imagePlan, { external_handoff: false }) })).toThrow(/Ed25519|signature/u);
     expect(validateImageReceipt({ plan: imagePlan, receipt: imageReceipt(imagePlan), requireSignature: false })).toMatchObject({ complete: true, signature_verified: false });
-    expect(imageSignatureRequired({})).toBe(true);
-    expect(imageSignatureRequired({ toolObservedObjects: true })).toBe(false);
-    expect(imageSignatureRequired({ toolObservedObjects: true, trustedPublicKey: 'a key' })).toBe(true);
-    expect(imageSignatureRequired({ toolObservedObjects: false, trustedPublicKey: 'a key' })).toBe(true);
   });
 });
 
@@ -271,9 +278,14 @@ describe('the full target row is compared, not only the columns the plan states'
     const quiet = targetFor(relational);
     quiet.observations[0] = { ...quiet.observations[0], sneaked_in: null, defaulted: 'active', computed: 7, now_default: '2026-10-20T00:00:00.000000Z' };
     const columnDefaults = { observations: { sneaked_in: { default: null }, defaulted: { default: "'active'::text" }, computed: { default: null, generated: true }, now_default: { default: 'now()' } } };
-    const fine = run({ relational, files: files(), tables: quiet, columnDefaults });
+    // a column filled by now() is the import time, which validate reads from the import record
+    const importedAt = 1792454400000000n; // 2026-10-20T00:00:00Z in microseconds
+    const fine = run({ relational, files: files(), tables: quiet, columnDefaults, importedAt });
     expect(fine.findings.counts).toEqual({});
     expect(fine.evidence.reembed.complete).toBe(true);
+    // with no import time to hold it to (or a different one), the value is not confirmed and counts as a change to the embedded row
+    expect(run({ relational, files: files(), tables: quiet, columnDefaults }).findings.samples[0].reasons).toContain('target-content-changed');
+    expect(run({ relational, files: files(), tables: quiet, columnDefaults, importedAt: importedAt + 1n }).findings.samples[0].reasons).toContain('target-content-changed');
     const wrongDefault = targetFor(relational);
     wrongDefault.observations[0] = { ...wrongDefault.observations[0], defaulted: 'something else' };
     expect(run({ relational, files: files(), tables: wrongDefault, columnDefaults }).findings.samples[0].reasons).toContain('target-content-changed');

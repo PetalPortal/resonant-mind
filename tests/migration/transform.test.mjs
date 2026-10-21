@@ -42,6 +42,7 @@ function reviewed(bundle, choose = () => undefined) {
     else if (item.type === 'broken-foreign-key' || item.type === 'broken-name-reference' || item.type === 'ambiguous-name-reference') item.choice = 'exclude-row';
     else if (item.type === 'entity-kind') item.choice = { action: 'map-to-node', kind: 'concept' };
     else item.choice = 'exclude-row';
+    item.stated_by = 'owner';
   }
   manifest.reviewed = true; manifest.reviewed_by = 'golden-reviewer'; manifest.reviewed_at = ISO; manifest.manifest_sha256 = decisionManifestHash(manifest); return manifest;
 }

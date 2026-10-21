@@ -55,11 +55,11 @@ describe('the draft names such a timestamp, and the dry run cannot be reached wi
   it('compiles only if the row is excluded', () => {
     const b = bundle('2026-02-30T00:00:00Z');
     const manifest = generateDecisionManifest(b, { now: '2026-09-20T00:00:00.000Z' });
-    manifest.items = manifest.items.map((item) => ({ ...item, choice: 'exclude-row' }));
+    manifest.items = manifest.items.map((item) => ({ ...item, stated_by: 'owner', choice: 'exclude-row' }));
     manifest.reviewed = true; manifest.reviewed_by = 'test'; manifest.reviewed_at = '2026-09-20T00:00:00.000Z'; manifest.manifest_sha256 = decisionManifestHash(manifest);
     expect(compilePolicy({ bundle: b, decisions: manifest }).excluded_rows.length).toBe(1);
     // a choice that cannot make the value real is not offered, and not accepted
-    manifest.items = manifest.items.map((item) => ({ ...item, choice: { action: 'normalize-utc', timezone: '+00:00' } }));
+    manifest.items = manifest.items.map((item) => ({ ...item, stated_by: 'owner', choice: { action: 'normalize-utc', timezone: '+00:00' } }));
     manifest.manifest_sha256 = decisionManifestHash(manifest);
     expect(() => compilePolicy({ bundle: b, decisions: manifest })).toThrow();
   });

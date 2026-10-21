@@ -53,7 +53,7 @@ const requiredHeadings = [
 ];
 
 const exactCommands = [
-  'inspect-source', 'export', 'verify-bundle', 'draft-decisions', 'apply-decisions', 'compile-policy', 'plan-relational',
+  'inspect-source', 'export', 'verify-bundle', 'draft-decisions', 'review-decisions', 'apply-decisions', 'compile-policy', 'plan-relational',
   'inspect-target', 'prepare-target', 'dry-run', 'import', 'plan-images', 'copy-images',
   'plan-reembed', 'validate', 'status',
 ];
@@ -128,9 +128,12 @@ describe('operator migration documentation', () => {
       'sha256',
       'fingerprint-missing-or-malformed',
       'signed-receipt-attested',
-      'tool-rehashed-objects',
+      'tool-rehashed-source-and-target',
+      'tool-rehashed-target-against-plan',
+      'signed-receipt-rehashed-target',
       'images_fingerprint',
       'copy-time-receipt',
+      'source-now',
       'object-binding-unverifiable',
       // status: one code per outcome
       '**Exit codes of `status`.**',
@@ -138,9 +141,58 @@ describe('operator migration documentation', () => {
       'must treat `3`, like `2`, as not proven',
       'makes `status` exit 3',
     ]);
-    // the old names of the two image states are gone
+    // the old names of the image states are gone
+    expect(text).not.toContain('tool-rehashed-objects');
     expect(text).not.toContain('attested-by-signed-receipt');
     expect(text).not.toMatch(/images`? \| `verified-by-tool`/u);
+  });
+
+  it('says that the owner decides from the real values, what an agent may not do, and who stated each choice', () => {
+    const guide = userGuide().replace(/\s+/gu, ' ');
+    assertHasEvery(guide, [
+      'The owner decides, from the real values',
+      'review-decisions',
+      'a hash of each observed value and not the value',
+      'default-src \'none\'; style-src \'unsafe-inline\'',
+      'no script, no link, no image, no font, no frame',
+      'must not be pasted into a chat',
+      'stated_by',
+      'owner-accepted-agent-suggestion',
+      'bulk_rule',
+      'A bulk approval must name its rule',
+      'that is not a choice',
+      'never an agent\'s',
+    ]);
+    const runbook = agentRunbook().replace(/\s+/gu, ' ');
+    assertHasEvery(runbook, [
+      'the owner decides from the real values',
+      'review-decisions',
+      'does not read it back, summarise it, paste it into chat',
+      'and it does not open the HTML file',
+      '"you decide", "whatever\'s sensible", "approve all"',
+      'that is not a choice',
+      'A bulk approval must name its rule',
+      'recorded verbatim in `bulk_rule`',
+      'owner-accepted-agent-suggestion',
+      'never its own name',
+    ]);
+  });
+
+  it('documents how an unsigned image receipt is checked, which defaults are evaluated, and that an offline comparison is not a validation', () => {
+    const text = `${userGuide()}\n${agentRunbook()}`.replace(/\s+/gu, ' ');
+    assertHasEvery(text, [
+      '--image-source-dir',
+      'receipt_seal',
+      'receipt-not-sealed',
+      'image-receipt-seal-invalid',
+      'source-dir-required-to-check-an-unsigned-receipt',
+      'image-source-differs-from-copy-fingerprint',
+      'default-expression-not-evaluated',
+      'transaction_timestamp()',
+      'an integer within the sequence',
+      'There is no acknowledgement',
+      'reconcileMigration',
+    ]);
   });
 
   it('contains the current CLI command names and parser options', () => {
@@ -154,7 +206,7 @@ describe('operator migration documentation', () => {
       '--target', '--bundle-manifest-sha256', '--compiled-policy-sha256',
       '--resume-schema', '--plan', '--staging-schema', '--receipt-out', '--dry-run',
       '--input', '--images', '--adapter', '--external-receipt', '--trusted-public-key',
-      '--reembed-plan', '--reembed-receipts', '--embedding-model', '--image-target-dir', '--dry-run-receipt', '--import-receipt',
+      '--reembed-plan', '--reembed-receipts', '--embedding-model', '--image-target-dir', '--image-source-dir', '--html', '--dry-run-receipt', '--import-receipt',
       '--image-plan', '--image-receipt', '--operator-cutover-ack',
     ]);
     expect(text).toContain('node scripts/v32-to-v4/cli.mjs <command> --help');

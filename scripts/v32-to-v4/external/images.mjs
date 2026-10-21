@@ -12,7 +12,8 @@ function sourceId(row, index) { return row.id ?? row.key ?? index; }
 function entryFor(idMaps, table, id) { return idMaps?.byKey?.get(`${table}:${canonicalJson(id).trim()}`) ?? idMaps?.idMap?.[`${table}:${canonicalJson(id).trim()}`]; }
 function withoutHash(value, field) { const copy = { ...value }; delete copy[field]; return copy; }
 function planHash(plan) { return canonicalSha256(withoutHash(plan, 'plan_sha256')); }
-function receiptHash(receipt) { return canonicalSha256(withoutHash(receipt, 'receipt_sha256')); }
+// the keyed seal is made over the hash, so it is not part of what the hash covers
+function receiptHash(receipt) { const { receipt_seal: _seal, ...rest } = receipt; return canonicalSha256(withoutHash(rest, 'receipt_sha256')); }
 function digest(value, label) { if (typeof value !== 'string' || !/^[0-9a-f]{64}$/u.test(value)) throw refuse(`${label} must be a lowercase SHA-256 digest.`); return value; }
 function expectedSize(value) { if (!Number.isSafeInteger(Number(value)) || Number(value) < 0) throw refuse('Image receipt is missing an exact object size.'); return Number(value); }
 function expectedMime(value) { if (typeof value !== 'string' || !/^image\/[a-z0-9.+-]+$/iu.test(value)) throw refuse('Image receipt is missing an exact image MIME type.'); return value.toLowerCase(); }
@@ -67,21 +68,9 @@ function verifyOfflineSignature(receipt, trustedPublicKey) {
   if (typeof signature.key_id !== 'string' || signature.key_id.length === 0) throw refuse('External image receipts require a trusted signature key ID.');
   const key = trustedKey(trustedPublicKey); if (!key) throw refuse('External image receipts require a configured trusted public key.');
   let bytes; try { bytes = Buffer.from(signature.value, 'base64'); } catch { throw refuse('External image receipt signature is not valid base64.'); }
-  const { signature: _signature, receipt_sha256: _receiptHash, ...signedBody } = receipt;
+  const { signature: _signature, receipt_sha256: _receiptHash, receipt_seal: _receiptSeal, ...signedBody } = receipt;
   if (!verifySignature(null, Buffer.from(canonicalJson(signedBody)), key, bytes)) throw refuse('External image receipt signature verification failed.');
   return true;
-}
-
-/**
- * Whether an image receipt must carry a signature. The operator's invocation decides this, never the receipt
- * (a receipt that says it is not an external handoff proves nothing about itself): the answer is yes unless
- * the operator named the directory the objects were copied to, so that the tool re-reads and re-hashes every
- * object itself (`toolObservedObjects`), and configured no trusted public key. A configured key always means
- * a signature is required. An unsigned receipt therefore completes images only where the tool looked at the
- * objects; anywhere else the copy can only be attested, and an attestation is a signature or nothing.
- */
-export function imageSignatureRequired({ trustedPublicKey, toolObservedObjects = false } = {}) {
-  return !(toolObservedObjects === true && !trustedPublicKey);
 }
 
 const set = (value) => value !== null && value !== undefined;
@@ -120,7 +109,7 @@ function entryProblem(item, actual) {
 }
 
 /**
- * `requireSignature` is the caller's decision (see imageSignatureRequired) and defaults to true: nothing in
+ * `requireSignature` is the caller's decision (validate makes it from how the operator invoked it) and defaults to true: nothing in
  * the receipt can switch it off.
  *
  * The result's `fingerprints` holds, for every planned object (by target key), the SHA-256, size and MIME type

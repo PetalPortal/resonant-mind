@@ -39,7 +39,7 @@ function reviewed() {
   const choices = { 'tension-state': { action: 'preserve-visits-and-open', last_visited: '2026-01-04T00:00:00.000Z' } };
   const unexpected = draft.items.filter((item) => choices[item.type] === undefined).map((item) => item.type);
   expect(unexpected).toEqual([]);
-  const manifest = { ...draft, items: draft.items.map((item) => ({ ...item, choice: choices[item.type] })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
+  const manifest = { ...draft, items: draft.items.map((item) => ({ ...item, stated_by: 'owner', choice: choices[item.type] })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
   manifest.manifest_sha256 = decisionManifestHash(manifest);
   return manifest;
 }
@@ -164,7 +164,7 @@ describe('a reviewed merge of duplicate entities', () => {
   };
   const mergeDraft = generateDecisionManifest(mergeBundle, { now: '2026-09-20T00:00:00.000Z' });
   const choice = { action: 'merge', survivor_id: 1, merged_ids: [1, 2], field_rules: { name: { source_id: 1 }, entity_type: { source_id: 1 }, primary_context: { source_id: 1 }, salience: { source_id: 1 }, created_at: { source_id: 1 }, updated_at: { source_id: 2 } } };
-  const mergeDecisions = { ...mergeDraft, items: mergeDraft.items.map((item) => ({ ...item, choice })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
+  const mergeDecisions = { ...mergeDraft, items: mergeDraft.items.map((item) => ({ ...item, stated_by: 'owner', choice })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
   mergeDecisions.manifest_sha256 = decisionManifestHash(mergeDecisions);
   const mergeCompiled = compilePolicy({ bundle: mergeBundle, decisions: mergeDecisions });
   const mergePlan = transformRelational({ bundle: mergeBundle, compiledPolicy: mergeCompiled });
@@ -254,7 +254,7 @@ describe('a merged entity is derived from the source rows and the reviewed rules
   };
   const draft = generateDecisionManifest(mergeBundle, { now: '2026-09-20T00:00:00.000Z' });
   const choice = { action: 'merge', survivor_id: 1, merged_ids: [1, 2], field_rules: { name: { source_id: 1 }, entity_type: { source_id: 1 }, primary_context: { source_id: 1 }, salience: { source_id: 2 }, created_at: { source_id: 1 }, updated_at: { source_id: 1 } } };
-  const decisions = { ...draft, items: draft.items.map((item) => ({ ...item, choice })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
+  const decisions = { ...draft, items: draft.items.map((item) => ({ ...item, stated_by: 'owner', choice })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
   decisions.manifest_sha256 = decisionManifestHash(decisions);
   const compiledMerge = compilePolicy({ bundle: mergeBundle, decisions });
   const mergePlan = transformRelational({ bundle: mergeBundle, compiledPolicy: compiledMerge });
@@ -295,7 +295,7 @@ describe('a rename comes from the reviewed decision', () => {
       ] },
     };
     const draft = generateDecisionManifest(renameBundle, { now: '2026-09-20T00:00:00.000Z' });
-    const decisions = { ...draft, items: draft.items.map((item) => ({ ...item, choice: { action: 'rename', names: { 1: 'Ada (home)', 2: 'Ada (work)' } } })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
+    const decisions = { ...draft, items: draft.items.map((item) => ({ ...item, stated_by: 'owner', choice: { action: 'rename', names: { 1: 'Ada (home)', 2: 'Ada (work)' } } })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
     decisions.manifest_sha256 = decisionManifestHash(decisions);
     const compiledRename = compilePolicy({ bundle: renameBundle, decisions });
     const members = transformRelational({ bundle: renameBundle, compiledPolicy: compiledRename }).members;
@@ -322,7 +322,7 @@ describe('a reviewed re-link or nullification is derived from the decision, not 
     },
   };
   const linkDraft = generateDecisionManifest(linkBundle, { now: '2026-09-20T00:00:00.000Z' });
-  const linkDecisions = { ...linkDraft, items: linkDraft.items.map((item) => ({ ...item, choice: item.field === 'superseded_by' ? 'null-if-allowed' : { action: 'link-by-reviewed-id', target_id: 3 } })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
+  const linkDecisions = { ...linkDraft, items: linkDraft.items.map((item) => ({ ...item, stated_by: 'owner', choice: item.field === 'superseded_by' ? 'null-if-allowed' : { action: 'link-by-reviewed-id', target_id: 3 } })), reviewed: true, reviewed_by: 'test', reviewed_at: '2026-09-20T00:01:00.000Z' };
   linkDecisions.manifest_sha256 = decisionManifestHash(linkDecisions);
   const linkCompiled = compilePolicy({ bundle: linkBundle, decisions: linkDecisions });
   const linkPlan = transformRelational({ bundle: linkBundle, compiledPolicy: linkCompiled });

@@ -133,3 +133,23 @@ describe('the status command through the CLI', () => {
     expect(noKey.stderr).toContain('RMIG-E-VALIDATION');
   });
 });
+
+describe('status keeps who stated the choices, and why the images are pending, in view', () => {
+  const key = keyFile('statements-key', 'status-statements-passphrase');
+  const statements = { stated_by: { owner: 3, 'owner-accepted-agent-suggestion': 2 }, bulk_rules: [{ rule: 'rename every duplicate by appending its context', items: 2 }], suggestions_accepted: ['a'.repeat(64), 'b'.repeat(64)] };
+  it('says how many choices began as an agent\'s suggestion, and each bulk rule verbatim', () => {
+    const report = sealed(readyReport({ decisions: { count: 5, sha256: 'c'.repeat(64), ...statements } }), 'status-statements-passphrase');
+    const result = statusCommand({ report, passphraseFile: key });
+    expect(result).toMatchObject({ status: 'ready-for-cutover', choices_stated_by: statements.stated_by, bulk_rules: statements.bulk_rules, suggestions_accepted: 2 });
+    const line = humanStatusResult(result);
+    expect(line).toContain('Reviewed choices: owner=3, owner-accepted-agent-suggestion=2; 2 item(s) settled by the owner\'s rule "rename every duplicate by appending its context".');
+  });
+  it('says nothing of statements a report does not carry, and names the reason the images wait', () => {
+    const plain = statusCommand({ report: sealed(readyReport(), 'status-statements-passphrase'), passphraseFile: key });
+    expect(humanStatusResult(plain)).not.toContain('Reviewed choices');
+    const pending = sealed(readyReport({ images_complete: false, images: { planned: 1, complete: false, basis: 'not-complete', pending_reason: 'receipt-not-sealed' } }), 'status-statements-passphrase');
+    const result = statusCommand({ report: pending, passphraseFile: key });
+    expect(result).toMatchObject({ status: 'data-imported-images-pending', images_pending_reason: 'receipt-not-sealed' });
+    expect(humanStatusResult(result)).toContain('images=pending (not complete: receipt-not-sealed)');
+  });
+});

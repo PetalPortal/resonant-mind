@@ -9,7 +9,7 @@ import { loadVerifiedBundle } from '../policy/generate.mjs';
 import { transformRelational } from '../transform/relational.mjs';
 import { checkExternalEvidence } from '../validate/external-evidence.mjs';
 import { passphraseBytes } from '../lib/bundle.mjs';
-import { sealReport } from '../lib/report-seal.mjs';
+import { sealReport, verifyImageReceiptSeal } from '../lib/report-seal.mjs';
 import { postgresClientConfig } from '../source/postgres-v32.mjs';
 import { IMPORT_ORDER, bindRelationalPlan, buildDryRunReport, stageContentSha256 } from '../target/postgres.mjs';
 import { readV4Migrations, migrationSetSha256 } from '../../migrate-postgres.mjs';
@@ -27,31 +27,37 @@ import { parseOptions, readJsonFile, refuseArgument, writeJsonNew } from './shar
 const { Client } = pg;
 const PHASE = 'validate';
 const REQUIRED = ['--bundle', '--decisions', '--plan', '--source-kind', '--source', '--target', '--migration-id', '--dry-run-receipt', '--import-receipt', '--out'];
-const OPTIONAL = ['--passphrase-file', '--image-plan', '--image-receipt', '--image-target-dir', '--reembed-plan', '--reembed-receipts', '--embedding-model', '--trusted-public-key'];
+const OPTIONAL = ['--passphrase-file', '--image-plan', '--image-receipt', '--image-target-dir', '--image-source-dir', '--reembed-plan', '--reembed-receipts', '--embedding-model', '--trusted-public-key'];
 const OPTION_NAMES = Object.freeze({
   '--bundle': 'bundlePath', '--decisions': 'decisionsPath', '--plan': 'planPath', '--source-kind': 'sourceKind', '--source': 'source', '--target': 'target',
   '--migration-id': 'migrationId', '--dry-run-receipt': 'dryRunReceiptPath', '--import-receipt': 'importReceiptPath', '--out': 'outPath',
-  '--passphrase-file': 'passphraseFile', '--image-plan': 'imagePlanPath', '--image-receipt': 'imageReceiptPath', '--image-target-dir': 'imageTargetDir', '--reembed-plan': 'reembedPlanPath',
+  '--passphrase-file': 'passphraseFile', '--image-plan': 'imagePlanPath', '--image-receipt': 'imageReceiptPath', '--image-target-dir': 'imageTargetDir', '--image-source-dir': 'imageSourceDir', '--reembed-plan': 'reembedPlanPath',
   '--reembed-receipts': 'reembedReceiptsPath', '--embedding-model': 'embeddingModel', '--trusted-public-key': 'trustedPublicKeyPath',
 });
 
 export function parseValidateArgs(argv) {
   const values = parseOptions(PHASE, argv, { required: REQUIRED, optional: OPTIONAL });
   if (!['postgres', 'sqlite', 'd1-export'].includes(values['--source-kind'])) throw refuseArgument(PHASE, '--source-kind must be postgres, sqlite, or d1-export.');
+  if (values['--image-source-dir'] !== undefined && values['--image-target-dir'] === undefined) throw refuseArgument(PHASE, '--image-source-dir needs --image-target-dir: the source objects are held to the copied objects, so the tool has to read both.');
   if (values['--reembed-receipts'] !== undefined && values['--embedding-model'] === undefined) throw refuseArgument(PHASE, '--reembed-receipts needs --embedding-model: the receipts are held to the embedding model the v4 deployment is configured for, which only the operator can state.');
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [OPTION_NAMES[key], value]));
 }
 
 /**
- * Reads, itself, every object the image inventory plans from the directory the operator says the images
- * were copied to, and hashes it. A missing, unreadable or unsafe object is recorded as missing, never skipped.
+ * Reads, itself, every object the image inventory plans and hashes it, from the directory the operator says the
+ * images were copied to (`side: 'target'`, each object by its target key) or copied from (`side: 'source'`, each
+ * by its source path; the result is still keyed by target key). The rules are the copy's own: no symlink, no path
+ * outside the directory, a regular file, a MIME type from the content's magic bytes. A missing, unreadable or
+ * unsafe object is recorded as missing, never skipped.
  */
-export function observeImageObjects(directory, inventory) {
+export function observeImageObjects(directory, inventory, { side = 'target' } = {}) {
+  const option = side === 'source' ? '--image-source-dir' : '--image-target-dir';
   let store;
-  try { store = new FilesystemObjectStore(directory); } catch { throw refuseArgument(PHASE, '--image-target-dir is missing or is not a real directory.'); }
+  try { store = new FilesystemObjectStore(directory); } catch { throw refuseArgument(PHASE, `${option} is missing or is not a real directory.`); }
   const observed = {};
   for (const entry of inventory.entries) {
-    try { const { sha256, size, mime } = readHandle(store.root, entry.target_key); observed[entry.target_key] = { sha256, size, mime }; } catch { observed[entry.target_key] = { missing: true }; }
+    const key = side === 'source' ? entry.source_logical_path : entry.target_key;
+    try { const { sha256, size, mime } = readHandle(store.root, key); observed[entry.target_key] = { sha256, size, mime }; } catch { observed[entry.target_key] = { missing: true }; }
   }
   return { observed };
 }
@@ -78,6 +84,8 @@ export async function validateCommand(args) {
     reembedReceipts: args.reembedReceiptsPath ? readJsonFile(PHASE, args.reembedReceiptsPath, 'The re-embedding receipts') : undefined,
     trustedPublicKey: undefined,
     imageObjects: undefined,
+    imageSourceObjects: undefined,
+    imageReceiptSeal: undefined,
     embeddingModel: args.embeddingModel,
   };
   if (args.trustedPublicKeyPath) { try { files.trustedPublicKey = readFileSync(args.trustedPublicKeyPath, 'utf8'); } catch { throw refuseArgument(PHASE, 'The trusted public-key file is missing or unreadable.'); } }
@@ -99,6 +107,9 @@ export async function validateCommand(args) {
   const rebuilt = transformRelational({ bundle, compiledPolicy: compiled });
   // what the tool itself sees of the copied image objects: only if the operator names the directory they were copied to
   if (args.imageTargetDir !== undefined) files.imageObjects = observeImageObjects(args.imageTargetDir, rebuilt.image_inventory);
+  if (args.imageSourceDir !== undefined) files.imageSourceObjects = observeImageObjects(args.imageSourceDir, rebuilt.image_inventory, { side: 'source' });
+  // the filesystem copy seals its receipt with the migration passphrase; whether the seal holds is judged here, with the passphrase this run was given
+  if (files.imageReceipt !== undefined) files.imageReceiptSeal = files.imageReceipt?.receipt_seal === undefined ? 'absent' : sealKey === null ? 'unverifiable' : (verifyImageReceiptSeal(files.imageReceipt, sealKey) ? 'valid' : 'invalid');
   if (plan.compiled_policy_sha256 !== compiled.plan_sha256) findings.add('plan-not-built-from-these-decisions', {});
   if (canonicalJson(rebuilt) !== canonicalJson(plan)) findings.add('plan-not-reproducible-from-bundle', {});
   if (plan.bundle_manifest_sha256 !== bundle.bundle_manifest_sha256 || plan.migration_id !== migrationId) findings.add('plan-not-bound-to-bundle', {});
@@ -160,7 +171,7 @@ export async function validateCommand(args) {
 
   // 5. Column by column: source -> target, and plan -> target.
   const sourceToTarget = compareSourceToTarget({ sourceTables: bundle.tables, targetTables: live.tables, compiled, decisions, importedAt: live.importedAt, family });
-  const planToTarget = comparePlanToTarget({ plan, targetTables: live.tables, columnTypes: live.columnTypes, columnDefaults: live.columnDefaults, importedAt: live.importedAt });
+  const planToTarget = comparePlanToTarget({ plan, targetTables: live.tables, columnTypes: live.columnTypes, columnDefaults: live.columnDefaults, importedAt: live.importedAt, sequences: live.sequenceRanges });
   const merge = (target, from) => { target.samples.push(...from.samples); for (const [check, count] of Object.entries(from.counts)) target.counts[check] = (target.counts[check] ?? 0) + count; };
 
   // 6. Cross-table invariants over the stored rows.
@@ -175,7 +186,7 @@ export async function validateCommand(args) {
   for (const id of plannedImages) if (!storedImages.has(id)) findings.add('inventoried-image-row-missing', {});
 
   // 7. External work: supplied evidence is validated; none supplied leaves the state pending, never ready.
-  const evidence = checkExternalEvidence({ derived: { members: rebuilt.members, imageInventory: rebuilt.image_inventory, reembedPlan: rebuilt.reembed_jobs }, files, migrationId, live: { tables: live.tables, columnTypes: live.columnTypes, columnDefaults: live.columnDefaults, embeddingDimension: live.embeddingDimension, importedAt: live.importedAt }, findings: external });
+  const evidence = checkExternalEvidence({ derived: { members: rebuilt.members, imageInventory: rebuilt.image_inventory, reembedPlan: rebuilt.reembed_jobs }, files, migrationId, live: { tables: live.tables, columnTypes: live.columnTypes, columnDefaults: live.columnDefaults, embeddingDimension: live.embeddingDimension, importedAt: live.importedAt, sequenceRanges: live.sequenceRanges }, findings: external });
 
   merge(findings, sourceToTarget.findings);
   merge(findings, planToTarget.findings);
@@ -200,10 +211,10 @@ export async function validateCommand(args) {
     counts: { bundle: tableCounts(bundle.tables), target: Object.fromEntries(Object.entries(live.tables).map(([table, rows]) => [table, rows.length])), plan: Object.fromEntries(Object.entries(plan.members).map(([table, rows]) => [table, rows.length])) },
     comparison: {
       source_to_target: { cells_compared: sourceToTarget.cells_compared, tables: sourceToTarget.tables, sanctioned_differences: sourceToTarget.sanctioned },
-      plan_to_target: { cells_compared: planToTarget.cells_compared, tables: planToTarget.tables },
+      plan_to_target: { cells_compared: planToTarget.cells_compared, tables: planToTarget.tables, default_expressions_not_evaluated: planToTarget.unevaluated_defaults },
     },
     invariants: live.checks,
-    decisions: { count: decisions.items.length, sha256: canonicalSha256(decisions) },
+    decisions: { count: decisions.items.length, sha256: canonicalSha256(decisions), ...compiled.choice_statements },
     losses: { count: plan.losses.length, sha256: canonicalSha256(plan.losses) },
     images: evidence.images,
     reembed: evidence.reembed,

@@ -66,7 +66,7 @@ describe('JSON: a repeated key hides a value, so it is refused at any depth', ()
 
   it('compiles only once the item is decided', () => {
     const manifest = generateDecisionManifest(bundle, { now: '2026-09-20T00:00:00.000Z' });
-    manifest.items = manifest.items.map((item) => ({ ...item, choice: { action: 'map-json', value: { a: 1 } } }));
+    manifest.items = manifest.items.map((item) => ({ ...item, stated_by: 'owner', choice: { action: 'map-json', value: { a: 1 } } }));
     manifest.reviewed = true; manifest.reviewed_by = 'test'; manifest.reviewed_at = '2026-09-20T00:00:00.000Z'; manifest.manifest_sha256 = decisionManifestHash(manifest);
     expect(compilePolicy({ bundle, decisions: manifest }).value_map.json).toBeTruthy();
   });
@@ -123,10 +123,12 @@ describe('the plan is compared with every column the target holds, not only the 
     expect(compare(target({ entry_date: 'other' }), columnDefaults).findings.samples[0]).toMatchObject({ column: 'entry_date', difference: 'default-differs' });
     expect(compare(target({ tags: 'x' }), columnDefaults).findings.samples[0]).toMatchObject({ column: 'tags', difference: 'unplanned-value' });
     expect(compare(target({ tags: null, entry_date: null }), columnDefaults).findings.samples).toEqual([]);
-    // a default that is an expression (now(), nextval(...)) is not evaluated, and the report counts that instead of hiding it
-    const expression = compare(target({ created_at: '2026-10-20T00:00:00.000000Z' }), columnDefaults);
-    expect(expression.findings.samples).toEqual([]);
+    // a default that is an expression the tool cannot evaluate (here lower(...)) is never accepted: it is a finding naming the column
+    const expression = compare(target({ emotion: 'x' }), columnDefaults);
+    expect(expression.findings.samples).toEqual([expect.objectContaining({ check: 'default-expression-not-evaluated', table: 'journals', column: 'emotion' })]);
     expect(expression.tables.journals.default_expressions_not_evaluated).toBe(1);
+    expect(expression.unevaluated_defaults).toEqual([{ table: 'journals', column: 'emotion', cells: 1 }]);
+    expect(JSON.stringify(expression.findings.samples)).not.toContain('"x"');
   });
 
   it('knows a literal default when it sees one, and never evaluates anything else', () => {
@@ -210,7 +212,7 @@ describe('status says what it read, from when, and what each part rests on', () 
       format_version: 1, report_type: 'migration-reconciliation', validation_mode: 'live', validated_at: '2026-10-20T10:00:00.000Z', migration_id: 'rmig_status_four_01', counts: {},
       target: { identity_sha256: IDENTITY }, violations: [], violation_counts: {}, target_present: true, exported: true, dry_run_receipt_complete: true, import_receipt_complete: true, imported: true,
       relational_reconciliation_complete: true, images_complete: true, reembed_complete: true,
-      images: { basis: 'tool-rehashed-objects' }, reembed: { basis: 'receipts-attested', observed_by_tool: false }, ...overrides,
+      images: { basis: 'tool-rehashed-source-and-target' }, reembed: { basis: 'receipts-attested', observed_by_tool: false }, ...overrides,
     };
     for (const key of Object.keys(body)) if (body[key] === undefined) delete body[key];
     body.status = determineMigrationStatus(body, { requireReportHash: false });
@@ -237,18 +239,21 @@ describe('status says what it read, from when, and what each part rests on', () 
 
   it('names what is verified by the tool and what is only attested', () => {
     const ready = statusCommand({ report: report(), passphraseFile });
-    expect(ready.basis).toEqual({ relational: 'verified-by-tool', images: 'tool-rehashed-objects', images_fingerprint: 'not-recorded', reembed: 'attested-by-receipts', cutover: 'none' });
+    expect(ready.basis).toEqual({ relational: 'verified-by-tool', images: 'tool-rehashed-source-and-target', images_fingerprint: 'source-now', reembed: 'attested-by-receipts', cutover: 'none' });
     expect(humanStatusResult(ready)).toContain('reembedding=attested-by-receipts (attested by receipts, not observed); cutover=none');
     const signed = statusCommand({ report: report({ images: { basis: 'signed-receipt-attested' } }), passphraseFile });
     expect(signed.basis.images).toBe('signed-receipt-attested');
     expect(humanStatusResult(signed)).toContain('images=signed-receipt-attested (attested by a signed receipt, not observed by the tool)');
     // the tool re-reading the objects is said to be that, and what it held them to
-    const recorded = statusCommand({ report: report({ images: { basis: 'tool-rehashed-objects', expected_values: { from_plan: 0, from_receipt_fingerprint: 2 } } }), passphraseFile });
-    expect(recorded.basis).toMatchObject({ images: 'tool-rehashed-objects', images_fingerprint: 'copy-time-receipt' });
-    expect(humanStatusResult(recorded)).toContain('images=tool-rehashed-objects (the tool re-hashed the target objects and they match the fingerprint recorded when they were copied, not a check of the original sources now)');
-    const planned = statusCommand({ report: report({ images: { basis: 'tool-rehashed-objects', expected_values: { from_plan: 2, from_receipt_fingerprint: 0 } } }), passphraseFile });
-    expect(planned.basis.images_fingerprint).toBe('plan');
-    expect(humanStatusResult(planned)).toContain('they match the values the plan states');
+    expect(humanStatusResult(ready)).toContain('images=tool-rehashed-source-and-target (the tool re-hashed the source objects and the copied objects now: they are the same, and they match the copy receipt)');
+    const recorded = statusCommand({ report: report({ images: { basis: 'signed-receipt-rehashed-target', expected_values: { from_plan: 0, from_receipt_fingerprint: 2 } } }), passphraseFile });
+    expect(recorded.basis).toMatchObject({ images: 'signed-receipt-rehashed-target', images_fingerprint: 'copy-time-receipt' });
+    expect(humanStatusResult(recorded)).toContain('images=signed-receipt-rehashed-target (the tool re-hashed the copied objects and they match a receipt signed by a key the operator trusts; the original sources were not read)');
+    const planned = statusCommand({ report: report({ images: { basis: 'tool-rehashed-target-against-plan', expected_values: { from_plan: 2, from_receipt_fingerprint: 0 } } }), passphraseFile });
+    expect(planned.basis).toMatchObject({ images: 'tool-rehashed-target-against-plan', images_fingerprint: 'plan' });
+    expect(humanStatusResult(planned)).toContain('they match the values the plan states; the original sources were not read');
+    // the name an earlier build gave the basis is not a basis any more
+    expect(statusCommand({ report: report({ images: { basis: 'tool-rehashed-objects' } }), passphraseFile }).basis.images).toBe('complete-basis-not-recorded');
     expect(stateBasis(report({ images_complete: false, reembed_complete: false })).images).toBe('pending');
     expect(stateBasis(report({ images_complete: false, reembed_complete: false })).reembed).toBe('pending');
     expect(stateBasis({ relational_reconciliation_complete: false }).relational).toBe('not-established');

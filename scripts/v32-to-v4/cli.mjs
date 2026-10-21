@@ -18,6 +18,7 @@ import { parsePlanReembedArgs, planReembedCommand, humanPlanReembedResult } from
 import { parseValidateArgs, validateCommand, humanValidateResult } from './commands/validate.mjs';
 import { parseStatusArgs, statusCommand, statusExitCode, humanStatusResult } from './commands/status.mjs';
 import { draftDecisionsCommand, humanDraftDecisionsResult, parseDraftDecisionsArgs } from './commands/draft-decisions.mjs';
+import { humanReviewDecisionsResult, jsonReviewDecisionsResult, parseReviewDecisionsArgs, reviewDecisionsCommand } from './commands/review-decisions.mjs';
 import { applyDecisionsCommand, humanApplyDecisionsResult, parseApplyDecisionsArgs } from './commands/apply-decisions.mjs';
 import { humanPlanRelationalResult, parsePlanRelationalArgs, planRelationalCommand } from './commands/plan-relational.mjs';
 import { COMMANDS, fullHelp, usageFor } from './commands/usage.mjs';
@@ -122,6 +123,14 @@ function runMain({
     if (command === 'draft-decisions') {
       const result = draftDecisionsCommand(parseDraftDecisionsArgs(commandArgs));
       writeStdout(json ? `${canonicalJson(result)}\n` : humanDraftDecisionsResult(result));
+      return 0;
+    }
+    if (command === 'review-decisions') {
+      const parsed = parseReviewDecisionsArgs(commandArgs);
+      // the structured result never carries memory content, so --json would show the reader nothing: it needs the file to show it in
+      if (json && parsed.htmlPath === undefined) throw new MigrationRefusal({ code: 'RMIG-E-SOURCE-ARG', phase: 'review-decisions', summary: 'review-decisions shows memory content and never puts it in JSON; use --html <file> with --json, or leave --json off to read it in the terminal.', safe_details: {}, report_path: null });
+      const result = reviewDecisionsCommand(parsed);
+      writeStdout(json ? `${canonicalJson(jsonReviewDecisionsResult(result))}\n` : humanReviewDecisionsResult(result));
       return 0;
     }
     if (command === 'apply-decisions') {

@@ -9,6 +9,7 @@ export const COMMAND_GROUPS = Object.freeze([
   ]],
   ['Decisions and plan', [
     ['draft-decisions', ['--bundle <dir>', '--out <file>', '[--passphrase-file <file>]']],
+    ['review-decisions', ['--bundle <dir>', '--decisions <draft or edited file>', '[--passphrase-file <file>]', '[--html <new file>]']],
     ['apply-decisions', ['--bundle <dir>', '--decisions <edited draft>', '--reviewed-by <name>', '--out <file>', '[--passphrase-file <file>]']],
     ['compile-policy', ['--bundle <dir>', '--decisions <reviewed file>', '--out <file>', '[--passphrase-file <file>]', '[--allow-plaintext-artifact --acknowledge-plaintext-risk]']],
     ['plan-relational', ['--bundle <dir>', '--compiled-policy <file>', '--out <file>', '[--passphrase-file <file>]', '[--allow-plaintext-artifact --acknowledge-plaintext-risk]']],
@@ -21,11 +22,11 @@ export const COMMAND_GROUPS = Object.freeze([
   ]],
   ['Images and re-embedding (external work)', [
     ['plan-images', ['(--plan <relational plan> | --input <inventory file> | --source <dir>)', '--out <file>', '[--passphrase-file <file>]', '[--migration-id <id>]', '[--bundle-manifest-sha256 <sha256>]', '[--compiled-policy-sha256 <sha256>]']],
-    ['copy-images', ['--plan <file>', '--adapter filesystem|r2', '--receipt-out <file>', '[--source <dir> --target <dir>]', '[--external-receipt <file> --trusted-public-key <file>]']],
+    ['copy-images', ['--plan <file>', '--adapter filesystem|r2', '--receipt-out <file>', '[--source <dir> --target <dir> --passphrase-file <file>]', '[--external-receipt <file> --trusted-public-key <file>]']],
     ['plan-reembed', ['--input <relational plan>', '--migration-id <id>', '--out <file>', '[--passphrase-file <file>]', '[--images <image plan>]', '[--bundle-manifest-sha256 <sha256>]', '[--compiled-policy-sha256 <sha256>]']],
   ]],
   ['Validation', [
-    ['validate', ['--bundle <dir>', '--decisions <reviewed file>', '--plan <file>', '--source-kind postgres|sqlite|d1-export', '--source <env:NAME | path>', '--target <env:NAME>', '--migration-id <id>', '--dry-run-receipt <file>', '--import-receipt <file>', '--out <file>', '[--passphrase-file <file>]', '[--image-plan <file> --image-receipt <file>]', '[--image-target-dir <dir>]', '[--reembed-plan <file> --reembed-receipts <file> --embedding-model <model>]', '[--trusted-public-key <file>]']],
+    ['validate', ['--bundle <dir>', '--decisions <reviewed file>', '--plan <file>', '--source-kind postgres|sqlite|d1-export', '--source <env:NAME | path>', '--target <env:NAME>', '--migration-id <id>', '--dry-run-receipt <file>', '--import-receipt <file>', '--out <file>', '[--passphrase-file <file>]', '[--image-plan <file> --image-receipt <file>]', '[--image-target-dir <dir> [--image-source-dir <dir>]]', '[--reembed-plan <file> --reembed-receipts <file> --embedding-model <model>]', '[--trusted-public-key <file>]']],
     ['status', ['--report <validation report>', '[--passphrase-file <file>]', '[--cutover-evidence <file>]', '[--operator-cutover-ack]']],
   ]],
 ]);

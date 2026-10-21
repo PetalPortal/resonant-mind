@@ -16,6 +16,7 @@ export const MIGRATION_PHASES = Object.freeze([
   'export',
   'verify-bundle',
   'draft-decisions',
+  'review-decisions',
   'apply-decisions',
   'compile-policy',
   'plan-relational',

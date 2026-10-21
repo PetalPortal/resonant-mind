@@ -51,7 +51,7 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
     expect(compileDraft.stderr).toContain('RMIG-E-POLICY-UNRESOLVED');
     expect(existsSync(file('never.json'))).toBe(false);
 
-    const choose = (item) => ({ ...item, choice: REVIEW[item.type] });
+    const choose = (item) => ({ ...item, stated_by: 'owner', choice: REVIEW[item.type] });
     const incomplete = { ...state.draft, items: state.draft.items.map((item, index) => (index === 0 ? item : choose(item))) };
     writeFileSync(file('incomplete.json'), JSON.stringify(incomplete));
     const refused = runCli(['apply-decisions', '--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase'), '--decisions', file('incomplete.json'), '--reviewed-by', 'Test Reviewer', '--out', file('never2.json'), '--json']);
@@ -60,7 +60,7 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
     expect(existsSync(file('never2.json'))).toBe(false);
 
     for (const [label, wrong] of [['a wildcard', 'accept-all'], ['a choice the item does not allow', 'translate-to-orphan']]) {
-      const mutated = { ...state.draft, items: state.draft.items.map((item, index) => ({ ...item, choice: index === 0 ? wrong : REVIEW[item.type] })) };
+      const mutated = { ...state.draft, items: state.draft.items.map((item, index) => ({ ...item, stated_by: 'owner', choice: index === 0 ? wrong : REVIEW[item.type] })) };
       writeFileSync(file('wrong.json'), JSON.stringify(mutated));
       const wrongRun = runCli(['apply-decisions', '--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase'), '--decisions', file('wrong.json'), '--reviewed-by', 'Test Reviewer', '--out', file('never3.json')]);
       expect(wrongRun.status, label).toBe(2);
@@ -85,11 +85,11 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
   }, 180_000);
 
   it('applies a complete review, compiles the policy and builds the relational plan', () => {
-    const reviewedDraft = { ...state.draft, items: state.draft.items.map((item) => ({ ...item, choice: REVIEW[item.type] })) };
+    const reviewedDraft = { ...state.draft, items: state.draft.items.map((item) => ({ ...item, stated_by: 'owner', choice: REVIEW[item.type] })) };
     writeFileSync(file('decisions-edited.json'), JSON.stringify(reviewedDraft, null, 2));
     const applied = runCli(['apply-decisions', '--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase'), '--decisions', file('decisions-edited.json'), '--reviewed-by', 'Test Reviewer', '--out', file('decisions-reviewed.json')]);
     expect(applied.status, applied.output).toBe(0);
-    expect(applied.stdout).toMatch(/^apply-decisions: complete; items=\d+; reviewed_by="Test Reviewer"; manifest_sha256=[0-9a-f]{64}; out=/u);
+    expect(applied.stdout).toMatch(/^apply-decisions: complete; items=\d+; reviewed_by="Test Reviewer"; stated_by owner=\d+,owner-accepted-agent-suggestion=0; manifest_sha256=[0-9a-f]{64}; out=/u);
     state.reviewed = JSON.parse(readFileSync(file('decisions-reviewed.json'), 'utf8'));
     expect(state.reviewed).toMatchObject({ reviewed: true, reviewed_by: 'Test Reviewer' });
     expect(state.reviewed.reviewed_at).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
@@ -201,6 +201,7 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
     expect(existsSync(file('image-plan-2.json'))).toBe(false);
   }, 240_000);
 
+  const receipt0 = () => JSON.parse(readFileSync(file('image-receipt.json'), 'utf8'));
   it('copies the images of a v3.2 source, which stores no hash, size or type for them: the tool fingerprints what it copies', () => {
     const imagePlan = JSON.parse(readFileSync(file('image-plan.json'), 'utf8'));
     expect(imagePlan.entries).toHaveLength(1);
@@ -210,6 +211,13 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
     writeFileSync(join(file('picture-source'), 'images', 'ada.png'), bytes);
     mkdirSync(file('picture-target'));
     const copy = ['copy-images', '--plan', file('image-plan.json'), '--adapter', 'filesystem', '--source', file('picture-source'), '--target', file('picture-target')];
+
+    // a local copy writes a receipt with no signature, so it is sealed with the migration passphrase; without one there is nothing it could be used for
+    const unsealed = runCli([...copy, '--receipt-out', file('image-receipt-unsealed.json')], { RM_MIGRATION_PASSPHRASE_FILE: '' });
+    expect(unsealed.status, unsealed.output).toBe(2);
+    expect(unsealed.stderr).toContain('passphrase');
+    expect(existsSync(file('image-receipt-unsealed.json'))).toBe(false);
+    copy.push('--passphrase-file', file('passphrase'));
 
     // a missing source object refuses the copy as a whole, names the object by its key, and writes no receipt
     rmSync(join(file('picture-source'), 'images', 'ada.png'));
@@ -222,8 +230,9 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
     writeFileSync(join(file('picture-source'), 'images', 'ada.png'), bytes);
     const done = runCli([...copy, '--receipt-out', file('image-receipt.json')]);
     expect(done.status, done.output).toBe(0);
-    expect(done.stdout).toMatch(/^copy-images: status=complete; entries=1; source_fingerprints_recorded=1; receipt_sha256=[0-9a-f]{64}\n$/u);
-    const receipt = JSON.parse(readFileSync(file('image-receipt.json'), 'utf8'));
+    expect(done.stdout).toMatch(/^copy-images: status=complete; entries=1; source_fingerprints_recorded=1; sealed=true; receipt_sha256=[0-9a-f]{64}\n$/u);
+    const receipt = receipt0();
+    expect(receipt.receipt_seal).toMatchObject({ algorithm: 'hmac-sha256/scrypt-v1' });
     const hash = createHash('sha256').update(bytes).digest('hex');
     expect(receipt.plan_sha256).toBe(imagePlan.plan_sha256);
     expect(receipt.entries[0]).toMatchObject({ source_fingerprint: { sha256: hash, size: bytes.length, mime: 'image/jpeg' }, sha256: hash, size: bytes.length, mime: 'image/jpeg', verified: true });

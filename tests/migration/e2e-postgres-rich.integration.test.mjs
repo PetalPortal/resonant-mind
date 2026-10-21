@@ -14,6 +14,7 @@ import { createV4MigrationRunner } from '../../scripts/migrate-postgres.mjs';
 import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
 import { FilesystemObjectStore, copyImagePlan } from '../../scripts/v32-to-v4/external/filesystem-store.mjs';
 import { observeImageObjects } from '../../scripts/v32-to-v4/commands/validate.mjs';
+import { verifyImageReceiptSeal } from '../../scripts/v32-to-v4/lib/report-seal.mjs';
 import { Findings } from '../../scripts/v32-to-v4/validate/compare.mjs';
 import { checkExternalEvidence } from '../../scripts/v32-to-v4/validate/external-evidence.mjs';
 import { LONG, RICH_POSTGRES_SEED as SEED } from './helpers/seeds.mjs';
@@ -62,8 +63,8 @@ function reviewedPolicy(bundle) {
   // observation, and a tension keeps its visits but is not resolved. Anything else is a failure to see.
   const unexpected = [];
   const items = draft.items.map((item) => {
-    if (item.type === 'dormancy-translation') return { ...item, choice: 'translate-to-orphan' };
-    if (item.type === 'tension-state') return { ...item, choice: { action: 'preserve-visits-and-open', last_visited: '2026-01-04T00:00:00.000Z' } };
+    if (item.type === 'dormancy-translation') return { ...item, stated_by: 'owner', choice: 'translate-to-orphan' };
+    if (item.type === 'tension-state') return { ...item, stated_by: 'owner', choice: { action: 'preserve-visits-and-open', last_visited: '2026-01-04T00:00:00.000Z' } };
     unexpected.push(item.type + ' ' + item.source_table + '.' + item.field + ': ' + item.reason);
     return item;
   });
@@ -206,14 +207,14 @@ describe.skipIf(!runE2E)('real PostgreSQL v3.2 with every table populated to fre
         const pictureSource = join(root, 'picture-source'); const pictureTarget = join(root, 'picture-target');
         mkdirSync(join(pictureSource, 'images'), { recursive: true }); mkdirSync(pictureTarget);
         writeFileSync(join(pictureSource, 'images', 'one.png'), picture);
-        const copied = await copyImagePlan({ plan: imagePlan, sourceStore: new FilesystemObjectStore(pictureSource), targetStore: new FilesystemObjectStore(pictureTarget) });
+        const copied = await copyImagePlan({ plan: imagePlan, sourceStore: new FilesystemObjectStore(pictureSource), targetStore: new FilesystemObjectStore(pictureTarget), sealPassphrase: Buffer.from('the rich seed seal passphrase') });
         expect(copied.entries[0].source_fingerprint).toEqual({ sha256: createHash('sha256').update(picture).digest('hex'), size: picture.length, mime: 'image/png' });
         const imageRows = (await targetClient.query('SELECT id FROM images')).rows;
         expect(imageRows.map((row) => String(row.id))).toEqual([String(imagePlan.entries[0].linked_target_ids.image_id)]);
         const findings = new Findings();
-        const evidence = checkExternalEvidence({ derived: { members: plan.members, imageInventory: imagePlan, reembedPlan: plan.reembed_jobs }, files: { imagePlan, imageReceipt: copied, imageObjects: observeImageObjects(pictureTarget, imagePlan) }, migrationId: plan.migration_id, live: { tables: { images: imageRows }, columnTypes: {}, columnDefaults: {}, embeddingDimension: 768, importedAt: null }, findings });
+        const evidence = checkExternalEvidence({ derived: { members: plan.members, imageInventory: imagePlan, reembedPlan: plan.reembed_jobs }, files: { imagePlan, imageReceipt: copied, imageObjects: observeImageObjects(pictureTarget, imagePlan), imageSourceObjects: observeImageObjects(pictureSource, imagePlan, { side: 'source' }), imageReceiptSeal: verifyImageReceiptSeal(copied, Buffer.from('the rich seed seal passphrase')) ? 'valid' : 'invalid' }, migrationId: plan.migration_id, live: { tables: { images: imageRows }, columnTypes: {}, columnDefaults: {}, embeddingDimension: 768, importedAt: null }, findings });
         expect(findings.counts).toEqual({});
-        expect(evidence.images).toMatchObject({ complete: true, basis: 'tool-rehashed-objects', expected_values: { from_plan: 0, from_receipt_fingerprint: 1 } });
+        expect(evidence.images).toMatchObject({ complete: true, basis: 'tool-rehashed-source-and-target', receipt_seal: 'valid', expected_values: { from_plan: 0, from_receipt_fingerprint: 1 } });
       } finally {
         await sourceRead.end();
       }

@@ -6,7 +6,7 @@ import { canonicalJson } from '../../scripts/v32-to-v4/lib/canonical-json.mjs';
 
 function reviewed(bundle) {
   const manifest = generateDecisionManifest(bundle, { now: '2026-09-20T00:00:00.000Z' });
-  for (const item of manifest.items) item.choice = item.type === 'dormancy-translation' ? 'translate-to-orphan' : item.type === 'broken-foreign-key' ? 'null-if-allowed' : 'exclude-row';
+  for (const item of manifest.items) { item.stated_by = 'owner'; item.choice = item.type === 'dormancy-translation' ? 'translate-to-orphan' : item.type === 'broken-foreign-key' ? 'null-if-allowed' : 'exclude-row'; };
   manifest.reviewed = true; manifest.reviewed_by = 'test-reviewer'; manifest.reviewed_at = '2026-09-20T00:00:00.000Z'; manifest.manifest_sha256 = decisionManifestHash(manifest);
   return manifest;
 }

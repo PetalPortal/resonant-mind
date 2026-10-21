@@ -41,7 +41,7 @@ export function statusCommand({ report, reportPath, evidence, evidencePath, pass
   let cutover = evidence;
   if (cutover === undefined && evidencePath) { try { cutover = JSON.parse(readFileSync(evidencePath, 'utf8')); } catch { throw refuseArgument(PHASE, 'Cutover evidence is missing or invalid JSON.'); } }
   const acknowledged = operatorCutoverAcknowledged === true || ack === true;
-  const summary = { report_sha256: value.report_sha256 ?? null, counts: value.counts ?? {}, images_complete: value.images_complete ?? false, reembed_complete: value.reembed_complete ?? false, operator_cutover_acknowledged: acknowledged, cutover_evidence_supplied: cutover !== undefined };
+  const summary = { report_sha256: value.report_sha256 ?? null, counts: value.counts ?? {}, images_complete: value.images_complete ?? false, reembed_complete: value.reembed_complete ?? false, operator_cutover_acknowledged: acknowledged, cutover_evidence_supplied: cutover !== undefined, images_pending_reason: typeof value.images?.pending_reason === 'string' ? value.images.pending_reason : null, choices_stated_by: value.decisions?.stated_by ?? null, bulk_rules: Array.isArray(value.decisions?.bulk_rules) ? value.decisions.bulk_rules : [], suggestions_accepted: Array.isArray(value.decisions?.suggestions_accepted) ? value.decisions.suggestions_accepted.length : 0 };
 
   if (value.report_sha256 !== reportBodyHash(value)) return { status: 'refused', report_verified: false, reason: 'The report does not match its own hash; it was changed after validate wrote it.', ...summary };
   if (value.report_seal === undefined) {
@@ -67,9 +67,18 @@ export function statusCommand({ report, reportPath, evidence, evidencePath, pass
 }
 /** What the image state rests on, in words: the tool re-reading objects is not the tool seeing the original, and a signature is not the tool seeing anything. */
 function imagesNote(basis) {
-  if (basis.images === 'tool-rehashed-objects') return ` (the tool re-hashed the target objects and they match ${basis.images_fingerprint === 'plan' ? 'the values the plan states' : basis.images_fingerprint === 'copy-time-receipt' ? 'the fingerprint recorded when they were copied, not a check of the original sources now' : 'the plan and the fingerprint recorded when they were copied'})`;
+  if (basis.images === 'tool-rehashed-source-and-target') return ' (the tool re-hashed the source objects and the copied objects now: they are the same, and they match the copy receipt)';
+  if (basis.images === 'tool-rehashed-target-against-plan') return ` (the tool re-hashed the copied objects and they match ${basis.images_fingerprint === 'plan' ? 'the values the plan states' : 'the plan and the fingerprint recorded when they were copied'}; the original sources were not read)`;
+  if (basis.images === 'signed-receipt-rehashed-target') return ' (the tool re-hashed the copied objects and they match a receipt signed by a key the operator trusts; the original sources were not read)';
   if (basis.images === 'signed-receipt-attested') return ' (attested by a signed receipt, not observed by the tool)';
   return '';
+}
+/** Who stated the reviewed choices, in words: a choice that began as an agent's suggestion stays visible, and so does a bulk rule. */
+function statementsNote(result) {
+  const by = result.choices_stated_by;
+  if (by === null || by === undefined) return '';
+  const rules = (result.bulk_rules ?? []).map(({ rule, items }) => `${items} item(s) settled by the owner's rule ${JSON.stringify(rule)}`);
+  return ` Reviewed choices: ${Object.entries(by).map(([name, count]) => `${name}=${count}`).join(', ')}${rules.length === 0 ? '' : `; ${rules.join('; ')}`}.`;
 }
 export function humanStatusResult(result) {
   if (result.status === 'unverified') return `status: unverified (NOT proof; the report claimed ${result.claimed_status ?? 'nothing'}); exit code ${STATUS_EXIT_CODES.unverified}; report_sha256=${result.report_sha256 ?? 'none'}; ${result.reason}\n`;
@@ -79,5 +88,5 @@ export function humanStatusResult(result) {
   const when = typeof result.validated_at === 'string' ? result.validated_at : 'a time the report does not record';
   return `status: ${result.status}; report_verified=true; report_sha256=${result.report_sha256 ?? 'none'}; as_of_validation=true; validated_at=${result.validated_at ?? 'unknown'}; current_target_checked=false; `
     + `This is what validate proved at ${when} for ${target}; status does not look at the target, so it is not a check of the target now. Only running validate again checks the current target. `
-    + `Rests on: relational=${basis.relational}; images=${basis.images}${imagesNote(basis)}; reembedding=${basis.reembed}${basis.reembed === 'attested-by-receipts' ? ' (attested by receipts, not observed)' : ''}; cutover=${basis.cutover}${basis.cutover === 'attested-by-operator' ? ' (the operator\'s statement, not observed)' : ''}.\n`;
+    + `Rests on: relational=${basis.relational}; images=${basis.images}${imagesNote(basis)}${basis.images === 'pending' && result.images_pending_reason ? ` (not complete: ${result.images_pending_reason})` : ''}; reembedding=${basis.reembed}${basis.reembed === 'attested-by-receipts' ? ' (attested by receipts, not observed)' : ''}; cutover=${basis.cutover}${basis.cutover === 'attested-by-operator' ? ' (the operator\'s statement, not observed)' : ''}.${statementsNote(result)}\n`;
 }

@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest';
 import { migrationSetSha256, readV4Migrations, V4_MIGRATION_LOCK_ID, applyV4Migrations } from '../../scripts/migrate-postgres.mjs';
 import { CHECKS_SPEC_PATH, generateV4ChecksSpec, loadExpectedChecks } from '../../scripts/v32-to-v4/spec/v4-checks.mjs';
 import { postgresClientConfig } from '../../scripts/v32-to-v4/source/postgres-v32.mjs';
-import { Findings, comparePlanToTarget } from '../../scripts/v32-to-v4/validate/compare.mjs';
+import { parseInstantMicros } from '../../scripts/v32-to-v4/lib/instant.mjs';
+import { Findings, comparePlanToTarget, evaluableDefault, literalDefault } from '../../scripts/v32-to-v4/validate/compare.mjs';
 import { readLiveTarget } from '../../scripts/v32-to-v4/validate/live-target.mjs';
 import { adminUrl, hasAdminDatabase, withScratchDatabase } from './helpers/postgres-scratch.mjs';
 
@@ -90,11 +91,32 @@ describe.skipIf(!hasAdminDatabase)('the released v4 CHECK constraints, against a
       // a plan row that states only id and content: every other column the target holds is NULL or the database's own default
       const stored = clean.live.tables.journals[0];
       const plan = { members: { journals: [{ id: stored.id, content: stored.content }] } };
-      const compare = (live) => comparePlanToTarget({ plan, targetTables: { ...live.tables, journals: live.tables.journals }, columnTypes: live.columnTypes, columnDefaults: live.columnDefaults, importedAt: live.importedAt });
+      const compare = (live, importedAt = live.importedAt) => comparePlanToTarget({ plan, targetTables: { ...live.tables, journals: live.tables.journals }, columnTypes: live.columnTypes, columnDefaults: live.columnDefaults, importedAt, sequences: live.sequenceRanges });
       const journalFindings = (result) => result.findings.samples.filter((finding) => finding.table === 'journals');
-      expect(journalFindings(compare(clean.live))).toEqual([]);
-      expect(compare(clean.live).tables.journals.unstated_cells_compared).toBeGreaterThanOrEqual(5);
-      expect(compare(clean.live).tables.journals.default_expressions_not_evaluated).toBeGreaterThanOrEqual(1); // created_at is filled by now(), which is not evaluated
+      // created_at is filled by now(): it is the import's time, and this database has no import record to say what that time is,
+      // so the cell cannot be confirmed; it is a finding that names the column and the list of unevaluated columns says so
+      const unknownTime = compare(clean.live);
+      expect(journalFindings(unknownTime)).toEqual([expect.objectContaining({ check: 'default-expression-not-evaluated', column: 'created_at' })]);
+      expect(unknownTime.unevaluated_defaults).toEqual([{ table: 'journals', column: 'created_at', cells: 1 }]);
+      expect(unknownTime.tables.journals.unstated_cells_compared).toBeGreaterThanOrEqual(5);
+      expect(unknownTime.tables.journals.default_expressions_not_evaluated).toBe(1);
+      // given the transaction time the row was written in (what an import's now() is), the same cell is exactly the default
+      const createdAt = parseInstantMicros(stored.created_at);
+      expect(journalFindings(compare(clean.live, createdAt))).toEqual([]);
+      expect(compare(clean.live, createdAt).unevaluated_defaults).toEqual([]);
+      expect(compare(clean.live, createdAt).tables.journals.default_expressions_not_evaluated).toBe(0);
+      // and any other time is not
+      expect(journalFindings(compare(clean.live, createdAt + 1n))).toEqual([expect.objectContaining({ check: 'target-column-not-in-plan', column: 'created_at', difference: 'default-differs' })]);
+      // the sequence behind journals.id is read with its range, and the value in the column is an integer within it
+      expect(clean.live.sequenceRanges['public.journals_id_seq']).toEqual({ min: '1', max: '2147483647' });
+      expect(Object.keys(clean.live.sequenceRanges).length).toBeGreaterThan(10);
+      // nothing in the released schema is a default this validator cannot evaluate: a migration of the released schema never hits the finding
+      const unevaluable = [];
+      for (const [tableName, columns] of Object.entries(clean.live.columnDefaults)) for (const [columnName, info] of Object.entries(columns)) {
+        if (info.default === null || info.default === undefined || info.generated || info.identity) continue;
+        if (!literalDefault(info.default).literal && evaluableDefault(info.default).kind === null) unevaluable.push(`${tableName}.${columnName}: ${info.default}`);
+      }
+      expect(unevaluable).toEqual([]);
 
       const alter = new Client({ connectionString: url });
       await alter.connect();
@@ -107,7 +129,7 @@ describe.skipIf(!hasAdminDatabase)('the released v4 CHECK constraints, against a
       expect(changed.findings.counts['unique-index-unexpected']).toBe(2);
       expect(changed.findings.samples.filter((item) => item.check === 'unique-index-unexpected').map((item) => [item.index, item.reason]).sort()).toEqual([['rmig_expression_uq', 'expression-not-in-the-released-schema'], ['rmig_partial_uq', 'partial-not-in-the-released-schema']]);
       // a value in a column the plan row never states is a finding (journals.tags and journals.emotion have no default)
-      const columns = journalFindings(compare(changed.live)).filter((finding) => finding.check === 'target-column-not-in-plan').map((finding) => finding.column).sort();
+      const columns = journalFindings(compare(changed.live, createdAt)).filter((finding) => finding.check === 'target-column-not-in-plan').map((finding) => finding.column).sort();
       expect(columns).toEqual(['emotion', 'tags']);
     });
   }, 180_000);

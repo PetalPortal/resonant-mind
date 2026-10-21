@@ -31,7 +31,7 @@ function reviewDraft(draftPath, outPath, review) {
   const draft = JSON.parse(readFileSync(draftPath, 'utf8'));
   const unexpected = draft.items.filter((item) => review[item.type] === undefined).map((item) => `${item.type} ${item.source_table}.${item.field ?? ''}: ${item.reason}`);
   expect(unexpected, 'draft items nobody planned a review for').toEqual([]);
-  writeFileSync(outPath, JSON.stringify({ ...draft, items: draft.items.map((item) => ({ ...item, choice: review[item.type] })) }, null, 2));
+  writeFileSync(outPath, JSON.stringify({ ...draft, items: draft.items.map((item) => ({ ...item, stated_by: 'owner', choice: review[item.type] })) }, null, 2));
   return draft;
 }
 
@@ -79,12 +79,12 @@ function copyPictures({ file, env, outputs, tag }) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, PICTURE(`picture for ${entry.source_logical_path}`));
   }
-  const copy = step('copy-images', ['copy-images', '--plan', file('image-plan.json'), '--adapter', 'filesystem', '--source', source, '--target', target, '--receipt-out', receiptPath], env);
+  const copy = step('copy-images', ['copy-images', '--plan', file('image-plan.json'), '--adapter', 'filesystem', '--source', source, '--target', target, '--receipt-out', receiptPath, '--passphrase-file', file('passphrase')], env);
   outputs.push(copy.output);
-  expect(copy.stdout).toMatch(new RegExp(`^copy-images: status=complete; entries=${imagePlan.entries.length}; source_fingerprints_recorded=${imagePlan.entries.length}; receipt_sha256=[0-9a-f]{64}\\n$`, 'u'));
+  expect(copy.stdout).toMatch(new RegExp(`^copy-images: status=complete; entries=${imagePlan.entries.length}; source_fingerprints_recorded=${imagePlan.entries.length}; sealed=true; receipt_sha256=[0-9a-f]{64}\\n$`, 'u'));
   const receipt = JSON.parse(readFileSync(receiptPath, 'utf8'));
   for (const entry of receipt.entries) expect(entry.source_fingerprint).toEqual({ sha256: entry.sha256, size: entry.size, mime: 'image/png' });
-  return { imagePlan, source, target, receiptPath, receipt, args: ['--image-plan', file('image-plan.json'), '--image-receipt', receiptPath, '--image-target-dir', target] };
+  return { imagePlan, source, target, receiptPath, receipt, args: ['--image-plan', file('image-plan.json'), '--image-receipt', receiptPath, '--image-target-dir', target, '--image-source-dir', source], targetOnlyArgs: ['--image-plan', file('image-plan.json'), '--image-receipt', receiptPath, '--image-target-dir', target] };
 }
 
 /** What the embedder's receipt for an image job says about the object it embedded: the object that was copied. */
@@ -155,7 +155,7 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
           // The picture itself. A source object that is missing refuses the copy as a whole and leaves no receipt.
           mkdirSync(file('lost-source'));
           mkdirSync(file('lost-target'));
-          const lost = step('copy-images with the source object missing', ['copy-images', '--plan', file('image-plan.json'), '--adapter', 'filesystem', '--source', file('lost-source'), '--target', file('lost-target'), '--receipt-out', file('lost-receipt.json')], env, 2);
+          const lost = step('copy-images with the source object missing', ['copy-images', '--plan', file('image-plan.json'), '--adapter', 'filesystem', '--source', file('lost-source'), '--target', file('lost-target'), '--receipt-out', file('lost-receipt.json'), '--passphrase-file', file('passphrase')], env, 2);
           outputs.push(lost.output);
           expect(lost.stderr).toContain('RMIG-E-IMAGE-INCOMPLETE');
           expect(existsSync(file('lost-receipt.json'))).toBe(false);
@@ -170,12 +170,32 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
           writeFileSync(pictureObject, PICTURE('swapped after the copy'));
           const swapped = step('validate after the copied object changed', validateArgs({ ...common, out: 'validation-image-swapped.json', extra: pictures.args }), env, 2);
           outputs.push(swapped.output);
-          expect(Object.keys(JSON.parse(readFileSync(file('validation-image-swapped.json'), 'utf8')).violation_counts)).toEqual(['image-object-differs-from-copy-fingerprint']);
+          expect(Object.keys(JSON.parse(readFileSync(file('validation-image-swapped.json'), 'utf8')).violation_counts).sort()).toEqual(['image-object-differs-from-copy-fingerprint', 'image-source-differs-from-target']);
           writeFileSync(pictureObject, pictureBytes);
           const imaged = step('validate with the copied picture', validateArgs({ ...common, out: 'validation-images.json', extra: pictures.args }), env);
           outputs.push(imaged.output);
           expect(imaged.stdout).toMatch(/^validate: status=data-imported-not-search-ready; /u);
-          expect(JSON.parse(readFileSync(file('validation-images.json'), 'utf8'))).toMatchObject({ violations: [], images_complete: true, reembed_complete: false, images: { planned: 1, complete: true, basis: 'tool-rehashed-objects', objects_rehashed_by_tool: true, signature_required: false, receipt_signature_verified: false, expected_values: { from_plan: 0, from_receipt_fingerprint: 1 } } });
+          expect(JSON.parse(readFileSync(file('validation-images.json'), 'utf8'))).toMatchObject({ violations: [], images_complete: true, reembed_complete: false, images: { planned: 1, complete: true, basis: 'tool-rehashed-source-and-target', objects_rehashed_by_tool: true, source_objects_rehashed_by_tool: true, receipt_seal: 'valid', pending_reason: null, signature_required: false, receipt_signature_verified: false, expected_values: { from_plan: 0, from_receipt_fingerprint: 1 } } });
+
+          // Without the source directory the tool has seen only one end, and the receipt is a plain file: the images wait, and the report says why.
+          const oneEnd = step('validate with the target directory only', validateArgs({ ...common, out: 'validation-one-end.json', extra: pictures.targetOnlyArgs }), env);
+          outputs.push(oneEnd.output);
+          expect(oneEnd.stdout).toMatch(/^validate: status=data-imported-images-pending; /u);
+          expect(JSON.parse(readFileSync(file('validation-one-end.json'), 'utf8'))).toMatchObject({ violations: [], images_complete: false, images: { complete: false, basis: 'not-complete', pending_reason: 'source-dir-required-to-check-an-unsigned-receipt' } });
+          // A receipt written to match the target directory has no seal: pending, and not complete however well it matches
+          const { receipt_seal: _removedSeal, receipt_sha256: _removedHash, ...unsealedBody } = pictures.receipt;
+          writeFileSync(file('image-receipt-unsealed.json'), JSON.stringify({ ...unsealedBody, receipt_sha256: canonicalSha256(unsealedBody) }));
+          const unsealed = step('validate with a receipt that has no seal', validateArgs({ ...common, out: 'validation-unsealed.json', extra: ['--image-plan', file('image-plan.json'), '--image-receipt', file('image-receipt-unsealed.json'), '--image-target-dir', pictures.target, '--image-source-dir', pictures.source] }), env);
+          outputs.push(unsealed.output);
+          expect(JSON.parse(readFileSync(file('validation-unsealed.json'), 'utf8'))).toMatchObject({ violations: [], images_complete: false, images: { complete: false, pending_reason: 'receipt-not-sealed', receipt_seal: 'absent' } });
+          // The same receipt, sealed, with a source object changed since the copy: found
+          const sourceObject = join(pictures.source, ...imagePlan.entries[0].source_logical_path.split('/'));
+          const sourceBytes = readFileSync(sourceObject);
+          writeFileSync(sourceObject, PICTURE('the original, edited since the copy'));
+          const sourceMoved = step('validate after the source object changed', validateArgs({ ...common, out: 'validation-source-moved.json', extra: pictures.args }), env, 2);
+          outputs.push(sourceMoved.output);
+          expect(Object.keys(JSON.parse(readFileSync(file('validation-source-moved.json'), 'utf8')).violation_counts).sort()).toEqual(['image-source-differs-from-copy-fingerprint', 'image-source-differs-from-target']);
+          writeFileSync(sourceObject, sourceBytes);
 
           // Re-embedding evidence as the embedder would supply it, and the image receipt must name the object that was copied.
           step('plan-reembed', ['plan-reembed', '--input', file('plan.json'), '--passphrase-file', file('passphrase'), '--migration-id', migrationId, '--bundle-manifest-sha256', pipeline.hashes.bundle_manifest_sha256, '--compiled-policy-sha256', pipeline.hashes.compiled_policy_sha256, '--out', file('reembed-plan.json')], env);
@@ -193,11 +213,13 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
           expect(richReady.stdout).toMatch(/^validate: status=ready-for-cutover; /u);
           const richStatus = step('status', ['status', '--report', file('validation-ready.json'), '--passphrase-file', file('passphrase')], env);
           outputs.push(richStatus.output);
-          expect(richStatus.stdout).toContain('images=tool-rehashed-objects (the tool re-hashed the target objects and they match the fingerprint recorded when they were copied, not a check of the original sources now)');
+          expect(richStatus.stdout).toContain('images=tool-rehashed-source-and-target (the tool re-hashed the source objects and the copied objects now: they are the same, and they match the copy receipt)');
+          // and who stated each choice travels with the report: the review was the owner's
+          expect(JSON.parse(readFileSync(file('validation-ready.json'), 'utf8')).decisions).toMatchObject({ count: expect.any(Number), stated_by: { owner: expect.any(Number), 'owner-accepted-agent-suggestion': 0 }, bulk_rules: [], suggestions_accepted: [] });
 
           // The same copy attested instead: an operator who observed the objects signs the receipt, and the tool names no directory.
           const keys = generateKeyPairSync('ed25519');
-          const { receipt_sha256: _receiptHash, ...receiptBody } = pictures.receipt;
+          const { receipt_sha256: _receiptHash, receipt_seal: _receiptSeal, ...receiptBody } = pictures.receipt;
           const signedBy = (body) => ({ ...body, signature: { algorithm: 'ed25519', key_id: 'operator-test-key', value: sign(null, Buffer.from(canonicalJson(body)), keys.privateKey).toString('base64') } });
           writeFileSync(file('operator-public.pem'), keys.publicKey.export({ type: 'spki', format: 'pem' }));
           writeFileSync(file('image-receipt-signed.json'), JSON.stringify(signedBy(receiptBody)));
@@ -225,7 +247,7 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
             ['an enum value changed', "UPDATE threads SET thread_type = 'task' WHERE id = 'thr-2'", ['cell-mismatch', 'plan-cell-mismatch']],
             ['a sequence left behind the data', 'ALTER SEQUENCE journals_id_seq RESTART WITH 1', ['sequence-behind-data']],
             ['a CHECK constraint added that the released schema does not have (never run, so its violations are not even read)', 'ALTER TABLE journals ADD CONSTRAINT journals_never_valid CHECK (length(content) > 100000) NOT VALID', ['constraint-not-validated', 'check-constraint-unexpected']],
-            ['the importer\'s own receipt row removed', 'DELETE FROM migration_import_receipts', ['import-receipt-not-in-target', 'cell-mismatch', 'plan-cell-mismatch', 'recorded-default-not-observed']], // without the importer's own record the import time is unknown, so the v4 defaults cannot be shown to be right
+            ['the importer\'s own receipt row removed', 'DELETE FROM migration_import_receipts', ['import-receipt-not-in-target', 'cell-mismatch', 'plan-cell-mismatch', 'recorded-default-not-observed', 'default-expression-not-evaluated']], // without the importer's own record the import time is unknown, so the v4 defaults cannot be shown to be right, and a column filled by now() cannot be confirmed (it is listed, by column, and keeps the state from ready)
           ];
           for (const [index, [label, sql, expected]] of damage.entries()) {
             const name = `rmig_cli_clone_${process.pid}_${Date.now()}_${index}`;
@@ -246,6 +268,9 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
             for (const check of expected) expect(found, `${label}: ${check}`).toContain(check);
             expect(found.filter((check) => !expected.includes(check) && !identityNoise.includes(check)), `${label}: nothing unrelated`).toEqual([]);
             expect(damaged.violations.length).toBeGreaterThan(0);
+            // the columns whose default could not be confirmed are listed in the report, by table and column, never by value
+            if (expected.includes('default-expression-not-evaluated')) expect(damaged.comparison.plan_to_target.default_expressions_not_evaluated).toEqual(expect.arrayContaining([expect.objectContaining({ table: expect.any(String), column: expect.any(String), cells: expect.any(Number) })]));
+            else expect(damaged.comparison.plan_to_target.default_expressions_not_evaluated, label).toEqual([]);
             expect(JSON.stringify(damaged), label).not.toContain('stray');
           }
 
@@ -335,7 +360,7 @@ describe.skipIf(!hasAdminDatabase)('the operator flow through the CLI against li
         const pictures = copyPictures({ file, env, outputs, tag: kind });
         const imaged = step('validate with the copied image', validateArgs({ ...common, out: 'validation-imaged.json', extra: pictures.args }), env);
         expect(imaged.stdout).toMatch(/^validate: status=data-imported-not-search-ready;/u);
-        expect(JSON.parse(readFileSync(file('validation-imaged.json'), 'utf8'))).toMatchObject({ violations: [], images: { planned: 1, complete: true, basis: 'tool-rehashed-objects' } });
+        expect(JSON.parse(readFileSync(file('validation-imaged.json'), 'utf8'))).toMatchObject({ violations: [], images: { planned: 1, complete: true, basis: 'tool-rehashed-source-and-target' } });
 
         // The external provider's work, as the operator supplies it: a job plan from the CLI and a receipt for every job.
         step('plan-reembed', ['plan-reembed', '--input', file('plan.json'), '--passphrase-file', file('passphrase'), '--migration-id', migrationId, '--bundle-manifest-sha256', hashes.bundle_manifest_sha256, '--compiled-policy-sha256', hashes.compiled_policy_sha256, '--out', file('reembed-plan.json')], env);

@@ -2,7 +2,7 @@ import { canonicalSha256, sha256Hex } from '../lib/hash.mjs';
 import { FORMAT_VERSION } from '../lib/contracts.mjs';
 import { MigrationRefusal } from '../lib/refusal.mjs';
 import { extractBundleRows, bundleHash, generateDecisionItems, choiceForItem } from './generate.mjs';
-import { validateDecisionManifest } from './validate.mjs';
+import { summarizeStatements, validateDecisionManifest } from './validate.mjs';
 import { buildIdMaps } from '../transform/id-map.mjs';
 import { buildValueMaps } from '../transform/value-map.mjs';
 import { canonicalJson } from '../lib/canonical-json.mjs';
@@ -149,7 +149,7 @@ export function compilePolicy({ bundle, decisions, migrationId, bundleManifestSh
   if (losses.some((loss) => !loss.source_row_sha256)) refuse('Every loss entry must cite a source row hash.');
   losses.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b))); audit.sort((a, b) => canonicalJson(a).localeCompare(canonicalJson(b)));
   for (const [table, value] of Object.entries(coverage)) value.losses = losses.filter((loss) => loss.source_table === table).length;
-  const plan = { format_version: FORMAT_VERSION, plan_type: 'deterministic-v3-to-v4-policy', migration_id: migrationId ?? bundle.migration_id, source_family: mappingInfo.family ?? 'inferred', bundle_manifest_sha256: actualHash, decision_manifest_sha256: decisions.manifest_sha256, id_map: sortedEntries(Object.fromEntries(Object.entries(idMaps.idMap).sort(([a], [b]) => a.localeCompare(b)))), name_map: idMaps.serializedNames, merge_audit: idMaps.mergeAudit, value_map: valueMaps, link_map: sortedEntries(linkMap), excluded_rows: [...excludedRows].sort(), version_numbers: sortedEntries(versionNumbers), semantic_choices: sortedEntries(semanticChoices), losses, audit, coverage, mapping_tables: mappings.map((mapping) => mapping.source_table) };
+  const plan = { format_version: FORMAT_VERSION, plan_type: 'deterministic-v3-to-v4-policy', migration_id: migrationId ?? bundle.migration_id, source_family: mappingInfo.family ?? 'inferred', bundle_manifest_sha256: actualHash, decision_manifest_sha256: decisions.manifest_sha256, choice_statements: summarizeStatements(decisions), id_map: sortedEntries(Object.fromEntries(Object.entries(idMaps.idMap).sort(([a], [b]) => a.localeCompare(b)))), name_map: idMaps.serializedNames, merge_audit: idMaps.mergeAudit, value_map: valueMaps, link_map: sortedEntries(linkMap), excluded_rows: [...excludedRows].sort(), version_numbers: sortedEntries(versionNumbers), semantic_choices: sortedEntries(semanticChoices), losses, audit, coverage, mapping_tables: mappings.map((mapping) => mapping.source_table) };
   plan.plan_sha256 = canonicalSha256(plan); return plan;
 }
 export const compile = compilePolicy;

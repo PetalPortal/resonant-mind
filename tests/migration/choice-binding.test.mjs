@@ -19,7 +19,7 @@ const bundle = {
 
 function review(manifest, chooser) {
   const copy = JSON.parse(JSON.stringify(manifest));
-  for (const item of copy.items) item.choice = chooser(item);
+  for (const item of copy.items) { item.choice = chooser(item); item.stated_by = 'owner'; }
   copy.reviewed = true; copy.reviewed_by = 'test-reviewer'; copy.reviewed_at = '2026-09-20T00:00:00.000Z'; copy.manifest_sha256 = decisionManifestHash(copy);
   return copy;
 }

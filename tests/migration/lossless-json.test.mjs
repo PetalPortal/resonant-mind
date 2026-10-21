@@ -63,7 +63,7 @@ describe('a JSON number JavaScript cannot carry is a decision, not a silent chan
 
   it('compiles once a person has chosen how the value is to be stored', () => {
     const manifest = generateDecisionManifest(bundle, { now: '2026-09-20T00:00:00.000Z' });
-    manifest.items = manifest.items.map((item) => ({ ...item, choice: { action: 'map-json', value: ['12345678901234567891'] } }));
+    manifest.items = manifest.items.map((item) => ({ ...item, stated_by: 'owner', choice: { action: 'map-json', value: ['12345678901234567891'] } }));
     manifest.reviewed = true; manifest.reviewed_by = 'test'; manifest.reviewed_at = '2026-09-20T00:00:00.000Z'; manifest.manifest_sha256 = decisionManifestHash(manifest);
     expect(compilePolicy({ bundle, decisions: manifest }).value_map.json).toBeTruthy();
   });

@@ -6,6 +6,7 @@ import { canonicalJson } from '../lib/canonical-json.mjs';
 import { canonicalSha256 } from '../lib/hash.mjs';
 import { ObjectStore, assertObjectStore } from './object-store.mjs';
 import { mimeFor as sniffMime } from './images.mjs';
+import { sealImageReceipt } from '../lib/report-seal.mjs';
 
 function refuse(summary, details = {}) { return new MigrationRefusal({ code: 'RMIG-E-IMAGE-INCOMPLETE', phase: 'copy-images', summary, safe_details: details, report_path: null }); }
 function safeKey(key) { if (typeof key !== 'string' || key.length === 0 || key.includes('\\') || isAbsolute(key) || key.split('/').some((part) => !part || part === '.' || part === '..')) throw refuse('Image object key is not a safe relative path.', { reason: 'unsafe-path' }); return key; }
@@ -85,8 +86,13 @@ function plannedDisagrees(entry, seen) {
  *     No receipt is returned, so none can be mistaken for a complete copy.
  * The receipt records, per object, the fingerprint observed at copy time (`source_fingerprint`) and what the
  * copy hashed to; validate re-hashes the target objects and holds them to it.
+ *
+ * With `sealPassphrase` (the migration passphrase, as bytes) the receipt carries `receipt_seal`, the keyed seal
+ * the report uses. A receipt with no trusted signature (this one has none) completes images in `validate` only
+ * with a valid seal, because otherwise it is a plain file whose hash anyone could recompute, including from the
+ * target directory itself.
  */
-export async function copyImagePlan({ plan, sourceStore, targetStore, migrationId = plan?.migration_id, bundleManifestSha256 = plan?.bundle_manifest_sha256, compiledPolicySha256 = plan?.compiled_policy_sha256 } = {}) {
+export async function copyImagePlan({ plan, sourceStore, targetStore, migrationId = plan?.migration_id, bundleManifestSha256 = plan?.bundle_manifest_sha256, compiledPolicySha256 = plan?.compiled_policy_sha256, sealPassphrase } = {}) {
   assertObjectStore(sourceStore); assertObjectStore(targetStore);
   if (!plan || plan.plan_sha256 !== planHash(plan)) throw refuse('Image copy requires an intact image inventory plan.');
   const objects = []; const keys = new Set();
@@ -130,7 +136,7 @@ export async function copyImagePlan({ plan, sourceStore, targetStore, migrationI
     receipts.push({ source_table: entry.source_table ?? 'images', source_id: entry.source_id, image_id: entry.linked_target_ids?.image_id, source_logical_path: source, target_key: target, target_locator: entry.target_locator ?? { store: 'object', key: target }, source_fingerprint: { ...fingerprint }, source_sha256: fingerprint.sha256, status: 'complete', verified: true, sha256: verified.sha256, size: verified.size, mime: verified.mime });
   }
   if (failures.length > 0) throw refuseCopy();
-  const base = { format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: migrationId, plan_sha256: plan.plan_sha256, entries: receipts }; if (bundleManifestSha256 !== undefined) base.bundle_manifest_sha256 = bundleManifestSha256; if (compiledPolicySha256 !== undefined) base.compiled_policy_sha256 = compiledPolicySha256; const receipt = { ...base }; receipt.receipt_sha256 = canonicalSha256(receipt); return receipt;
+  const base = { format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: migrationId, plan_sha256: plan.plan_sha256, entries: receipts }; if (bundleManifestSha256 !== undefined) base.bundle_manifest_sha256 = bundleManifestSha256; if (compiledPolicySha256 !== undefined) base.compiled_policy_sha256 = compiledPolicySha256; const receipt = { ...base }; receipt.receipt_sha256 = canonicalSha256(receipt); if (sealPassphrase !== undefined) receipt.receipt_seal = sealImageReceipt(receipt, sealPassphrase); return receipt;
 }
 export { safeKey, sniffMime as mimeFor, readHandle };
 export const FilesystemStore = FilesystemObjectStore;

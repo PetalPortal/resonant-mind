@@ -115,6 +115,9 @@ export async function readLiveTarget({ client, migrationId, findings }) {
     // What fills a column the plan does not state: its default (as the catalog prints it, never evaluated here), or the database computing it.
     const columnDefaults = {};
     for (const row of (await client.query("SELECT c.relname::text AS table_name, a.attname::text AS column_name, pg_catalog.pg_get_expr(d.adbin, d.adrelid) AS column_default, (a.attgenerated::text <> '') AS generated, (a.attidentity::text <> '') AS identity FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped")).rows) (columnDefaults[row.table_name] ??= {})[row.column_name] = { default: row.column_default, generated: row.generated, identity: row.identity };
+    // The range of every sequence, so that a column filled by nextval(...) can be checked to hold a value the sequence could give.
+    const sequenceRanges = {};
+    for (const row of (await client.query("SELECT n.nspname::text AS schema_name, c.relname::text AS sequence_name, s.seqmin::text AS min, s.seqmax::text AS max FROM pg_catalog.pg_sequence s JOIN pg_catalog.pg_class c ON c.oid = s.seqrelid JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'public'")).rows) sequenceRanges[`${row.schema_name}.${row.sequence_name}`] = { min: row.min, max: row.max };
     const tables = {};
     for (const table of COMPARED_TARGET_TABLES) {
       if (!columnTypes[table]) { findings.add('target-table-missing', { table }); tables[table] = []; continue; }
@@ -145,6 +148,7 @@ export async function readLiveTarget({ client, migrationId, findings }) {
       tables,
       columnTypes,
       columnDefaults,
+      sequenceRanges,
       embeddingDimension: embeddingDimensionOf(columnTypes),
       checks: { constraints: constraints.length, foreign_keys: foreignKeysChecked, unique_indexes: uniquesChecked, check_constraints: checksChecked, check_constraints_unexpected: classified.unexpected.length, indexes: indexes.length, sequences },
     };
