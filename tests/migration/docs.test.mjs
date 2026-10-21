@@ -113,6 +113,36 @@ describe('operator migration documentation', () => {
     ]);
   });
 
+  it('documents how a v3.2 image can complete, the exit codes of status, and what each image state rests on', () => {
+    const text = `${userGuide()}\n${agentRunbook()}`;
+    assertHasEvery(text, [
+      // the copy fingerprints what it copies, and says so; what makes a copy refuse
+      'stores a path and descriptive columns and nothing about the object',
+      'source_fingerprint',
+      'detected from the bytes',
+      'never from the file name',
+      'writes no receipt',
+      'source-changed-after-fingerprint',
+      'target-holds-a-different-object',
+      // a receipt for objects the tool cannot read must carry the observed values
+      'sha256',
+      'fingerprint-missing-or-malformed',
+      'signed-receipt-attested',
+      'tool-rehashed-objects',
+      'images_fingerprint',
+      'copy-time-receipt',
+      'object-binding-unverifiable',
+      // status: one code per outcome
+      '**Exit codes of `status`.**',
+      '`3` means `unverified`',
+      'must treat `3`, like `2`, as not proven',
+      'makes `status` exit 3',
+    ]);
+    // the old names of the two image states are gone
+    expect(text).not.toContain('attested-by-signed-receipt');
+    expect(text).not.toMatch(/images`? \| `verified-by-tool`/u);
+  });
+
   it('contains the current CLI command names and parser options', () => {
     const text = userGuide();
     assertHasEvery(text, exactCommands);

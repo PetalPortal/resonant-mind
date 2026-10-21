@@ -21,4 +21,4 @@ export async function copyImagesCommand(args) {
   write(args.receiptOut, result); return result;
 }
 export function parseCopyImagesArgs(argv) { const values = flags(argv); return Object.fromEntries(Object.entries(values).map(([key, value]) => [key.slice(2).replace(/-([a-z])/gu, (_m, c) => c.toUpperCase()), value])); }
-export function humanCopyImagesResult(result) { return `copy-images: status=${result.status}; entries=${result.entries?.length ?? 0}; receipt_sha256=${result.receipt_sha256 ?? 'external'}\n`; }
+export function humanCopyImagesResult(result) { const fingerprints = (result.entries ?? []).filter((entry) => entry.source_fingerprint !== undefined).length; return `copy-images: status=${result.status}; entries=${result.entries?.length ?? 0}; source_fingerprints_recorded=${fingerprints}; receipt_sha256=${result.receipt_sha256 ?? 'external'}\n`; }

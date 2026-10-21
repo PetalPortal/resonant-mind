@@ -70,6 +70,7 @@ INSERT INTO observations (id, entity_id, content, weight, source_date, added_at,
 INSERT INTO dormant_observations (id, observation_id, first_marked, rescue_attempts) VALUES (1, 11, '2026-01-05 00:00:00', 2);
 INSERT INTO tensions (id, pole_a, pole_b, context, sit_count, sit_notes, status, created_at) VALUES ('t1', 'a', 'b', 'default', 3, '["x"]', 'active', '2026-01-06 00:00:00');
 INSERT INTO relations (id, from_entity, to_entity, relation_type, created_at) VALUES (1, 'Ada', 'Rhizome', 'tends', '2026-01-07 00:00:00');
+INSERT INTO images (id, path, description, entity_id, observation_id, created_at) VALUES (1, 'images/ada.png', 'a portrait of Ada', 1, 10, '2026-01-08 00:00:00');
 `;
 
 /** What the person reviewing the SQLITE_SEED draft decides, by kind of item. The CLI selects nothing itself. */

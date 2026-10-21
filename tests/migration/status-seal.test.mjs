@@ -100,7 +100,7 @@ describe('status reports a state only for a report that validate sealed', () => 
 });
 
 describe('the status command through the CLI', () => {
-  it('prints the state of a sealed report, and exits 2 when the evidence or the report is refused', async () => {
+  it('prints the state of a sealed report, exits 2 when the evidence or the report is refused, and 3 for a report it cannot verify', async () => {
     const { runCli } = await import('./helpers/cli-run.mjs');
     const passphrase = 'a-long-test-passphrase';
     const key = keyFile('cli-passphrase', passphrase);
@@ -122,6 +122,12 @@ describe('the status command through the CLI', () => {
     const edited = runCli(['status', '--report', join(work, 'edited.json'), '--passphrase-file', key]);
     expect(edited.status).toBe(2);
     expect(edited.stdout).toMatch(/^status: refused;.*own hash/u);
+    // an unsealed report is not proof: it exits 3, never 0
+    const { report_seal: _seal, ...unsealed } = report;
+    writeFileSync(join(work, 'unsealed.json'), JSON.stringify(unsealed));
+    const unverified = runCli(['status', '--report', join(work, 'unsealed.json'), '--passphrase-file', key]);
+    expect(unverified.status).toBe(3);
+    expect(unverified.stdout).toMatch(/^status: unverified/u);
     const noKey = runCli(['status', '--report', join(work, 'report.json')], { RM_MIGRATION_PASSPHRASE_FILE: '' });
     expect(noKey.status).toBe(2);
     expect(noKey.stderr).toContain('RMIG-E-VALIDATION');

@@ -8,13 +8,13 @@ import { ObjectStore, assertObjectStore } from './object-store.mjs';
 import { mimeFor as sniffMime } from './images.mjs';
 
 function refuse(summary, details = {}) { return new MigrationRefusal({ code: 'RMIG-E-IMAGE-INCOMPLETE', phase: 'copy-images', summary, safe_details: details, report_path: null }); }
-function safeKey(key) { if (typeof key !== 'string' || key.length === 0 || key.includes('\\') || isAbsolute(key) || key.split('/').some((part) => !part || part === '.' || part === '..')) throw refuse('Image object key is not a safe relative path.'); return key; }
-function assertNoSymlinkComponents(root, key) { let current = resolve(root); for (const part of key.split('/').slice(0, -1)) { current = join(current, part); let stat; try { stat = lstatSync(current); } catch (error) { if (error.code === 'ENOENT') break; throw error; } if (stat.isSymbolicLink()) throw refuse('Image path traverses a symlink.'); } }
+function safeKey(key) { if (typeof key !== 'string' || key.length === 0 || key.includes('\\') || isAbsolute(key) || key.split('/').some((part) => !part || part === '.' || part === '..')) throw refuse('Image object key is not a safe relative path.', { reason: 'unsafe-path' }); return key; }
+function assertNoSymlinkComponents(root, key) { let current = resolve(root); for (const part of key.split('/').slice(0, -1)) { current = join(current, part); let stat; try { stat = lstatSync(current); } catch (error) { if (error.code === 'ENOENT') break; throw error; } if (stat.isSymbolicLink()) throw refuse('Image path traverses a symlink.', { reason: 'symlink' }); } }
 function regularPath(root, key, { allowMissing = false } = {}) {
-  safeKey(key); assertNoSymlinkComponents(root, key); const base = resolve(root); const candidate = resolve(base, ...key.split('/')); const rel = relative(base, candidate); if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw refuse('Image path escapes the configured object root.');
-  let stat; try { stat = lstatSync(candidate); } catch (error) { if (allowMissing && error.code === 'ENOENT') return null; throw refuse('An image object is missing.'); }
-  if (stat.isSymbolicLink()) throw refuse('Symlink image objects are refused.'); if (!stat.isFile()) throw refuse('Image object must be a regular file.');
-  const realRoot = resolve(realpathSync.native(base)); const realCandidate = resolve(realpathSync.native(candidate)); const realRel = relative(realRoot, realCandidate); if (realRel === '..' || realRel.startsWith(`..${sep}`) || isAbsolute(realRel)) throw refuse('Image path resolves outside the configured object root.');
+  safeKey(key); assertNoSymlinkComponents(root, key); const base = resolve(root); const candidate = resolve(base, ...key.split('/')); const rel = relative(base, candidate); if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw refuse('Image path escapes the configured object root.', { reason: 'escapes-root' });
+  let stat; try { stat = lstatSync(candidate); } catch (error) { if (allowMissing && error.code === 'ENOENT') return null; throw refuse('An image object is missing.', { reason: 'missing' }); }
+  if (stat.isSymbolicLink()) throw refuse('Symlink image objects are refused.', { reason: 'symlink' }); if (!stat.isFile()) throw refuse('Image object must be a regular file.', { reason: 'not-a-regular-file' });
+  const realRoot = resolve(realpathSync.native(base)); const realCandidate = resolve(realpathSync.native(candidate)); const realRel = relative(realRoot, realCandidate); if (realRel === '..' || realRel.startsWith(`..${sep}`) || isAbsolute(realRel)) throw refuse('Image path resolves outside the configured object root.', { reason: 'escapes-root' });
   return { path: candidate, stat };
 }
 function readHandle(root, key) {
@@ -22,8 +22,8 @@ function readHandle(root, key) {
   try {
     fd = openSync(found.path, constants.O_RDONLY);
     const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.size !== found.stat.size || (opened.dev !== undefined && found.stat.dev !== undefined && opened.dev !== found.stat.dev) || (opened.ino !== undefined && found.stat.ino !== undefined && opened.ino !== found.stat.ino)) throw refuse('Image source changed while it was being opened.');
-    const bytes = readFileSync(fd); const after = fstatSync(fd); if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs) throw refuse('Image source changed while it was being read.');
+    if (!opened.isFile() || opened.size !== found.stat.size || (opened.dev !== undefined && found.stat.dev !== undefined && opened.dev !== found.stat.dev) || (opened.ino !== undefined && found.stat.ino !== undefined && opened.ino !== found.stat.ino)) throw refuse('Image source changed while it was being opened.', { reason: 'changed-while-reading' });
+    const bytes = readFileSync(fd); const after = fstatSync(fd); if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs) throw refuse('Image source changed while it was being read.', { reason: 'changed-while-reading' });
     const sha256 = createHash('sha256').update(bytes).digest('hex'); return { bytes, sha256, size: bytes.byteLength, mime: sniffMime(bytes) };
   } finally { if (fd !== undefined) closeSync(fd); }
 }
@@ -51,20 +51,85 @@ export class FilesystemObjectStore extends ObjectStore {
 export async function buildFilesystemInventory(root, options = {}) { return new FilesystemObjectStore(root).inventory(options); }
 function targetEntries(plan) { return Array.isArray(plan?.entries) ? plan.entries : []; }
 function planHash(plan) { const copy = { ...plan }; delete copy.plan_sha256; return canonicalSha256(copy); }
+
+// What a source object is, observed from its bytes: SHA-256, size, and a MIME type detected from the content's
+// magic bytes (never from the file name). A source that cannot be read is { ok: false, reason }, never a skip.
+const fingerprintOf = (item) => ({ sha256: item.sha256, size: Number(item.size), mime: String(item.mime).toLowerCase() });
+const sameFingerprint = (a, b) => a.sha256 === b.sha256 && a.size === b.size && a.mime === b.mime;
+async function observe(store, key) {
+  try {
+    if (typeof store.readVerified === 'function') { const item = await store.readVerified(key); return { ok: true, fingerprint: fingerprintOf(item), bytes: item.bytes }; }
+    const [item] = await store.inventory({ keys: [key] });
+    if (!item || item.missing) return { ok: false, reason: 'missing' };
+    return { ok: true, fingerprint: fingerprintOf(item) };
+  } catch (error) { return { ok: false, reason: error instanceof MigrationRefusal && typeof error.safe_details?.reason === 'string' ? error.safe_details.reason : 'unreadable' }; }
+}
+// The values a plan states for an object (a source that stores none states none) are held to what was observed.
+function plannedDisagrees(entry, seen) {
+  if (entry.expected_sha256 !== null && entry.expected_sha256 !== undefined && entry.expected_sha256 !== seen.sha256) return true;
+  if (entry.expected_size !== null && entry.expected_size !== undefined && Number(entry.expected_size) !== seen.size) return true;
+  if (entry.expected_mime !== null && entry.expected_mime !== undefined && String(entry.expected_mime).toLowerCase() !== seen.mime) return true;
+  return false;
+}
+
+/**
+ * Copies every object the image plan lists and returns the receipt. v3.2's images table stores no hash, size or
+ * MIME type, so for such a source the plan states none and the tool is the one that observes them:
+ *  1. every source object is fingerprinted first (SHA-256, size, content-detected MIME), and a source that is
+ *     missing, unreadable, a symlink or outside the source root, not an image, or at odds with a value the plan
+ *     does state, refuses the whole copy before anything is written;
+ *  2. each object is then read again and must still be the fingerprinted object, is written exclusively (never
+ *     over a different existing object), read back and hashed, and the source is hashed once more after the
+ *     copy: an object whose bytes changed between fingerprint and copy, or whose copy differs, is a failure;
+ *  3. any failure refuses the copy as a whole and names each failed object, by its target key and the reason.
+ *     No receipt is returned, so none can be mistaken for a complete copy.
+ * The receipt records, per object, the fingerprint observed at copy time (`source_fingerprint`) and what the
+ * copy hashed to; validate re-hashes the target objects and holds them to it.
+ */
 export async function copyImagePlan({ plan, sourceStore, targetStore, migrationId = plan?.migration_id, bundleManifestSha256 = plan?.bundle_manifest_sha256, compiledPolicySha256 = plan?.compiled_policy_sha256 } = {}) {
-  assertObjectStore(sourceStore); assertObjectStore(targetStore); if (!plan || plan.plan_sha256 !== planHash(plan)) throw refuse('Image copy requires an intact image inventory plan.'); const entries = targetEntries(plan); const seen = new Map(); const receipts = [];
-  for (const entry of entries) {
-    if (typeof entry.expected_sha256 !== 'string' || !/^[0-9a-f]{64}$/u.test(entry.expected_sha256) || !Number.isSafeInteger(Number(entry.expected_size)) || Number(entry.expected_size) < 0 || typeof entry.expected_mime !== 'string' || !/^image\//u.test(entry.expected_mime)) throw refuse('Image plan requires exact SHA-256, size, and MIME metadata.');
-    const source = entry.source_logical_path ?? entry.source_key; const target = entry.target_key; if (typeof source !== 'string' || typeof target !== 'string') throw refuse('Image plan contains an incomplete object entry.');
-    if (seen.has(target) && seen.get(target) !== entry.expected_sha256) throw refuse('Image plan contains duplicate target keys with different content.'); seen.set(target, entry.expected_sha256);
-    const expected = { sha256: entry.expected_sha256, size: entry.expected_size, mime: entry.expected_mime }; let sourceMeta;
-    if (typeof sourceStore.readVerified === 'function') sourceMeta = await sourceStore.readVerified(source); else { const sourceInventory = await sourceStore.inventory({ keys: [source] }); sourceMeta = sourceInventory[0]; if (!sourceMeta || sourceMeta.missing) sourceMeta = { missing: true }; }
-    if (!sourceMeta || sourceMeta.missing) throw refuse('One or more planned image objects are missing.');
-    if (sourceMeta.sha256 !== expected.sha256 || Number(sourceMeta.size) !== Number(expected.size) || sourceMeta.mime !== expected.mime) throw refuse('Image source content does not match the exact planned hash, size, or MIME.');
-    const current = await targetStore.verify(target, expected); if (!current.verified) { const bytes = sourceMeta.bytes ?? Buffer.from(await new Response(await sourceStore.openRead(source)).arrayBuffer()); await targetStore.put(target, bytes, { mime: sourceMeta.mime }); }
-    const verified = await targetStore.verify(target, expected); if (!verified.verified) throw refuse('Image destination did not verify against the exact planned object.');
-    receipts.push({ source_logical_path: source, target_key: target, target_locator: entry.target_locator ?? { store: 'object', key: target }, source_sha256: sourceMeta.sha256, status: 'complete', verified: true, sha256: verified.sha256, size: verified.size, mime: verified.mime });
+  assertObjectStore(sourceStore); assertObjectStore(targetStore);
+  if (!plan || plan.plan_sha256 !== planHash(plan)) throw refuse('Image copy requires an intact image inventory plan.');
+  const objects = []; const keys = new Set();
+  for (const entry of targetEntries(plan)) {
+    const source = entry.source_logical_path ?? entry.source_key; const target = entry.target_key;
+    if (typeof source !== 'string' || typeof target !== 'string') throw refuse('Image plan contains an incomplete object entry.');
+    if (keys.has(target)) throw refuse('Image plan contains duplicate target keys.');
+    keys.add(target); objects.push({ entry, source, target });
   }
+  const failures = [];
+  const fail = (target, reason) => failures.push({ target_key: target, reason });
+  const refuseCopy = () => refuse(`${failures.length} of ${objects.length} planned image objects could not be copied; no receipt was written.`, { failed: failures.length, planned: objects.length, objects: failures.slice(0, 50) });
+
+  // 1. fingerprint every source object, and write nothing until every one of them can be
+  const fingerprints = new Map();
+  for (const { entry, source, target } of objects) {
+    const seen = await observe(sourceStore, source);
+    if (!seen.ok) { fail(target, seen.reason); continue; }
+    if (!/^image\/[a-z0-9.+-]+$/u.test(seen.fingerprint.mime)) { fail(target, 'not-a-recognised-image'); continue; }
+    if (plannedDisagrees(entry, seen.fingerprint)) { fail(target, 'differs-from-plan'); continue; }
+    fingerprints.set(target, seen.fingerprint);
+  }
+  if (failures.length > 0) throw refuseCopy();
+
+  // 2. copy, read back, and look at the source again
+  const receipts = [];
+  for (const { entry, source, target } of objects) {
+    const fingerprint = fingerprints.get(target);
+    const atCopy = await observe(sourceStore, source);
+    if (!atCopy.ok) { fail(target, atCopy.reason); continue; }
+    if (!sameFingerprint(atCopy.fingerprint, fingerprint)) { fail(target, 'source-changed-after-fingerprint'); continue; }
+    let verified;
+    try {
+      const current = await targetStore.verify(target, fingerprint);
+      if (!current.verified) { const bytes = atCopy.bytes ?? Buffer.from(await new Response(await sourceStore.openRead(source)).arrayBuffer()); await targetStore.put(target, bytes, { mime: fingerprint.mime }); }
+      verified = await targetStore.verify(target, fingerprint);
+    } catch (error) { fail(target, error instanceof MigrationRefusal && /different existing/u.test(error.summary) ? 'target-holds-a-different-object' : 'copy-failed'); continue; }
+    if (!verified.verified) { fail(target, 'copy-differs-from-source'); continue; }
+    const after = await observe(sourceStore, source);
+    if (!after.ok || !sameFingerprint(after.fingerprint, fingerprint)) { fail(target, 'source-changed-during-copy'); continue; }
+    receipts.push({ source_table: entry.source_table ?? 'images', source_id: entry.source_id, image_id: entry.linked_target_ids?.image_id, source_logical_path: source, target_key: target, target_locator: entry.target_locator ?? { store: 'object', key: target }, source_fingerprint: { ...fingerprint }, source_sha256: fingerprint.sha256, status: 'complete', verified: true, sha256: verified.sha256, size: verified.size, mime: verified.mime });
+  }
+  if (failures.length > 0) throw refuseCopy();
   const base = { format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: migrationId, plan_sha256: plan.plan_sha256, entries: receipts }; if (bundleManifestSha256 !== undefined) base.bundle_manifest_sha256 = bundleManifestSha256; if (compiledPolicySha256 !== undefined) base.compiled_policy_sha256 = compiledPolicySha256; const receipt = { ...base }; receipt.receipt_sha256 = canonicalSha256(receipt); return receipt;
 }
 export { safeKey, sniffMime as mimeFor, readHandle };

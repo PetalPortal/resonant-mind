@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
@@ -13,7 +13,8 @@ import { transformRelational } from '../../scripts/v32-to-v4/transform/relationa
 import { buildDryRunReport, buildImportReceipt } from '../../scripts/v32-to-v4/target/postgres.mjs';
 import { validateReembedReceipts } from '../../scripts/v32-to-v4/external/reembed.mjs';
 import { reconcileMigration } from '../../scripts/v32-to-v4/validate/reconcile.mjs';
-import { buildImageInventory, validateImageReceipt } from '../../scripts/v32-to-v4/external/images.mjs';
+import { validateImageReceipt } from '../../scripts/v32-to-v4/external/images.mjs';
+import { FilesystemObjectStore, copyImagePlan } from '../../scripts/v32-to-v4/external/filesystem-store.mjs';
 import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -48,6 +49,8 @@ describe('synthetic D1/SQLite v3.2 to v4 operator path', () => {
       db.exec(copySql(fixture('0003_graph_health.sql')));
       db.prepare("INSERT INTO entities (id, name, entity_type, primary_context) VALUES (?, ?, ?, ?)").run(1, 'Synthetic person', 'person', 'default');
       db.prepare("INSERT INTO observations (id, entity_id, content, source, context) VALUES (?, ?, ?, ?, ?)").run(7, 1, 'synthetic migration proof', 'conversation', 'default');
+      // v3.2 keeps a path for an image and nothing else about the object
+      db.prepare("INSERT INTO images (id, path, description, entity_id, observation_id, created_at) VALUES (?, ?, ?, ?, ?, ?)").run(1, 'images/synthetic.png', 'a synthetic picture', 1, 7, '2026-01-02T03:04:05Z');
     } finally { db.close(); }
     const beforeHash = hashFile(sourcePath);
 
@@ -68,16 +71,24 @@ describe('synthetic D1/SQLite v3.2 to v4 operator path', () => {
     expect(plan.legacy_vectors_imported).toBe(false);
     expect(plan.members.observations).toHaveLength(1);
 
-    const imagePlan = buildImageInventory({ images: [], migrationId: plan.migration_id, bundleManifestSha256: plan.bundle_manifest_sha256, compiledPolicySha256: plan.compiled_policy_sha256 });
-    const imageReceipt = { format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: imagePlan.migration_id, plan_sha256: imagePlan.plan_sha256, bundle_manifest_sha256: imagePlan.bundle_manifest_sha256, compiled_policy_sha256: imagePlan.compiled_policy_sha256, entries: [] };
-    validateImageReceipt({ plan: imagePlan, receipt: imageReceipt, requireSignature: false });
+    // the image: the plan states no hash, size or type, so the tool fingerprints what it copies
+    const imagePlan = plan.image_inventory;
+    expect(imagePlan.entries).toHaveLength(1);
+    expect(imagePlan.entries[0]).toMatchObject({ expected_sha256: null, expected_size: null, expected_mime: null });
+    const pictureSource = join(root, 'picture-source'); const pictureTarget = join(root, 'picture-target');
+    mkdirSync(join(pictureSource, 'images'), { recursive: true }); mkdirSync(pictureTarget);
+    writeFileSync(join(pictureSource, 'images', 'synthetic.png'), Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from('a synthetic picture')]));
+    const imageReceipt = await copyImagePlan({ plan: imagePlan, sourceStore: new FilesystemObjectStore(pictureSource), targetStore: new FilesystemObjectStore(pictureTarget) });
+    expect(imageReceipt.entries[0]).toMatchObject({ mime: 'image/png', verified: true, source_fingerprint: { sha256: imageReceipt.entries[0].sha256, size: imageReceipt.entries[0].size, mime: 'image/png' } });
+    const imageFingerprints = validateImageReceipt({ plan: imagePlan, receipt: imageReceipt, requireSignature: false }).fingerprints;
     const reembedPlan = plan.reembed_jobs;
     const missingExternal = () => reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'synthetic-model', expectedDimension: 3, source: bundle.tables, exported: bundle.tables, staged: bundle.tables, target: bundle.tables, imagePlan, imageReceipt, reembedPlan, migrationId: plan.migration_id });
     expect(missingExternal).not.toThrow();
     expect(missingExternal().status).toBe('refused');
 
-    const reembedReceipts = { format_version: 1, migration_id: reembedPlan.migration_id, plan_sha256: reembedPlan.plan_sha256, bundle_manifest_sha256: reembedPlan.bundle_manifest_sha256, compiled_policy_sha256: reembedPlan.compiled_policy_sha256, receipts: reembedPlan.jobs.map((job) => ({ job_id: job.job_id, migration_id: job.migration_id, plan_sha256: reembedPlan.plan_sha256, bundle_manifest_sha256: reembedPlan.bundle_manifest_sha256, compiled_policy_sha256: reembedPlan.compiled_policy_sha256, target_locator: job.target_locator, status: 'complete', model: 'synthetic-model', dimension: 3, content_hash: job.content_hash })) };
-    expect(validateReembedReceipts({ plan: reembedPlan, receipts: reembedReceipts, expectedModel: 'synthetic-model', expectedDimension: 3 })).toMatchObject({ complete: true });
+    const reembedReceipts = { format_version: 1, migration_id: reembedPlan.migration_id, plan_sha256: reembedPlan.plan_sha256, bundle_manifest_sha256: reembedPlan.bundle_manifest_sha256, compiled_policy_sha256: reembedPlan.compiled_policy_sha256, receipts: reembedPlan.jobs.map((job) => ({ job_id: job.job_id, migration_id: job.migration_id, plan_sha256: reembedPlan.plan_sha256, bundle_manifest_sha256: reembedPlan.bundle_manifest_sha256, compiled_policy_sha256: reembedPlan.compiled_policy_sha256, target_locator: job.target_locator, status: 'complete', model: 'synthetic-model', dimension: 3, content_hash: job.content_hash, ...(job.modality === 'image' ? { source_logical_path: job.source_logical_path, target_key: job.target_key, object_sha256: imageReceipt.entries[0].sha256, source_sha256: imageReceipt.entries[0].sha256, object_size: imageReceipt.entries[0].size, object_mime: imageReceipt.entries[0].mime } : {}) })) };
+    expect(validateReembedReceipts({ plan: reembedPlan, receipts: reembedReceipts, expectedModel: 'synthetic-model', expectedDimension: 3, imageFingerprints })).toMatchObject({ complete: true });
+    expect(() => validateReembedReceipts({ plan: reembedPlan, receipts: reembedReceipts, expectedModel: 'synthetic-model', expectedDimension: 3 })).toThrow(/do not prove complete/u);
     const targetIdentity = { database_identity_sha256: 'c'.repeat(64) };
     const dryRunReceipt = buildDryRunReport({ plan, targetIdentity, migrationSetSha256: 'd'.repeat(64), migratorVersion: '4.0.1', stageContentSha256: canonicalSha256(plan.members), targetStateSha256: canonicalSha256({ fresh: true }) });
     const importReceipt = buildImportReceipt({ plan, dryRun: dryRunReceipt, targetIdentity, insertedRows: Object.values(plan.members).reduce((sum, rows) => sum + rows.length, 0) });

@@ -1,7 +1,9 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
+import { canonicalJson } from '../../scripts/v32-to-v4/lib/canonical-json.mjs';
 import { readArtifactFile } from './helpers/artifacts.mjs';
 import { runCli } from './helpers/cli-run.mjs';
 import { SQLITE_REVIEW as REVIEW, createSqliteSource } from './helpers/seeds.mjs';
@@ -100,7 +102,7 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
 
     const planned = runCli(['plan-relational', '--bundle', file('bundle.rmigrate'), '--passphrase-file', file('passphrase'), '--compiled-policy', file('compiled-policy.json'), '--out', file('plan.json')]);
     expect(planned.status, planned.output).toBe(0);
-    expect(planned.stdout).toMatch(/^plan-relational: complete; rows=\d+; losses=\d+; images=0; reembed_jobs=\d+; migration_id=rmig_cli_sqlite_01; bundle_manifest_sha256=[0-9a-f]{64}; compiled_policy_sha256=[0-9a-f]{64}; plan_sha256=[0-9a-f]{64}; encrypted; out=/u);
+    expect(planned.stdout).toMatch(/^plan-relational: complete; rows=\d+; losses=\d+; images=1; reembed_jobs=\d+; migration_id=rmig_cli_sqlite_01; bundle_manifest_sha256=[0-9a-f]{64}; compiled_policy_sha256=[0-9a-f]{64}; plan_sha256=[0-9a-f]{64}; encrypted; out=/u);
     const plan = readArtifactFile(file('plan.json'), 'relational-plan', file('passphrase'));
     expect(planned.stdout).toContain('; encrypted; out=');
     expect(plan.compiled_policy_sha256).toBe(policy.plan_sha256);
@@ -198,6 +200,64 @@ describe('the operator flow through the CLI on a SQLite v3.2 source', () => {
     expect(mixed.status).toBe(2);
     expect(existsSync(file('image-plan-2.json'))).toBe(false);
   }, 240_000);
+
+  it('copies the images of a v3.2 source, which stores no hash, size or type for them: the tool fingerprints what it copies', () => {
+    const imagePlan = JSON.parse(readFileSync(file('image-plan.json'), 'utf8'));
+    expect(imagePlan.entries).toHaveLength(1);
+    expect(imagePlan.entries[0]).toMatchObject({ source_logical_path: 'images/ada.png', expected_sha256: null, expected_size: null, expected_mime: null });
+    const bytes = Buffer.concat([Buffer.from([255, 216, 255, 224]), Buffer.from('a portrait that is really a jpeg, whatever its name says')]);
+    mkdirSync(join(file('picture-source'), 'images'), { recursive: true });
+    writeFileSync(join(file('picture-source'), 'images', 'ada.png'), bytes);
+    mkdirSync(file('picture-target'));
+    const copy = ['copy-images', '--plan', file('image-plan.json'), '--adapter', 'filesystem', '--source', file('picture-source'), '--target', file('picture-target')];
+
+    // a missing source object refuses the copy as a whole, names the object by its key, and writes no receipt
+    rmSync(join(file('picture-source'), 'images', 'ada.png'));
+    const missing = runCli([...copy, '--receipt-out', file('image-receipt-never.json'), '--json']);
+    expect(missing.status, missing.output).toBe(2);
+    expect(JSON.parse(missing.stdout)).toMatchObject({ code: 'RMIG-E-IMAGE-INCOMPLETE', phase: 'copy-images', safe_details: { failed: 1, planned: 1, objects: [{ target_key: imagePlan.entries[0].target_key, reason: 'missing' }] } });
+    expect(missing.stdout).not.toContain('ada.png');
+    expect(existsSync(file('image-receipt-never.json'))).toBe(false);
+
+    writeFileSync(join(file('picture-source'), 'images', 'ada.png'), bytes);
+    const done = runCli([...copy, '--receipt-out', file('image-receipt.json')]);
+    expect(done.status, done.output).toBe(0);
+    expect(done.stdout).toMatch(/^copy-images: status=complete; entries=1; source_fingerprints_recorded=1; receipt_sha256=[0-9a-f]{64}\n$/u);
+    const receipt = JSON.parse(readFileSync(file('image-receipt.json'), 'utf8'));
+    const hash = createHash('sha256').update(bytes).digest('hex');
+    expect(receipt.plan_sha256).toBe(imagePlan.plan_sha256);
+    expect(receipt.entries[0]).toMatchObject({ source_fingerprint: { sha256: hash, size: bytes.length, mime: 'image/jpeg' }, sha256: hash, size: bytes.length, mime: 'image/jpeg', verified: true });
+    expect(readFileSync(join(file('picture-target'), ...imagePlan.entries[0].target_key.split('/')))).toEqual(bytes);
+    // the receipt is not replaced by a later run
+    const again = runCli([...copy, '--receipt-out', file('image-receipt.json')]);
+    expect(again.status).toBe(2);
+    expect(again.stderr).toMatch(/already exists/u);
+
+    // The R2 route: the tool reads nothing, so a signed receipt has to carry what the operator observed for the object
+    const keys = generateKeyPairSync('ed25519');
+    writeFileSync(file('operator-public.pem'), keys.publicKey.export({ type: 'spki', format: 'pem' }));
+    const entry = imagePlan.entries[0];
+    const body = (fingerprint = true) => ({
+      format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: imagePlan.migration_id, plan_sha256: imagePlan.plan_sha256, bundle_manifest_sha256: imagePlan.bundle_manifest_sha256, compiled_policy_sha256: imagePlan.compiled_policy_sha256, external_handoff: true,
+      entries: [{ target_key: entry.target_key, source_logical_path: entry.source_logical_path, target_locator: entry.target_locator, verified: true, source_sha256: hash, ...(fingerprint ? { sha256: hash, size: bytes.length, mime: 'image/jpeg' } : {}) }],
+    });
+    const signed = (value) => ({ ...value, signature: { algorithm: 'ed25519', key_id: 'operator-test-key', value: sign(null, Buffer.from(canonicalJson(value)), keys.privateKey).toString('base64') } });
+    const r2 = (name, receiptOut) => ['copy-images', '--plan', file('image-plan.json'), '--adapter', 'r2', '--external-receipt', file(name), '--trusted-public-key', file('operator-public.pem'), '--receipt-out', file(receiptOut)];
+    writeFileSync(file('r2-receipt-bare.json'), JSON.stringify(signed(body(false))));
+    const bare = runCli(r2('r2-receipt-bare.json', 'r2-never.json'));
+    expect(bare.status, bare.output).toBe(2);
+    expect(bare.stderr).toContain('RMIG-E-IMAGE-INCOMPLETE');
+    expect(existsSync(file('r2-never.json'))).toBe(false);
+    writeFileSync(file('r2-receipt.json'), JSON.stringify(signed(body())));
+    const attested = runCli(r2('r2-receipt.json', 'r2-accepted.json'));
+    expect(attested.status, attested.output).toBe(0);
+    expect(existsSync(file('r2-accepted.json'))).toBe(true);
+    // a signature from a key that is not the trusted one is not a signature
+    const otherKeys = generateKeyPairSync('ed25519');
+    writeFileSync(file('r2-receipt-other-key.json'), JSON.stringify({ ...signed(body()), signature: { algorithm: 'ed25519', key_id: 'someone-else', value: sign(null, Buffer.from(canonicalJson(body())), otherKeys.privateKey).toString('base64') } }));
+    expect(runCli(r2('r2-receipt-other-key.json', 'r2-never-2.json')).status).toBe(2);
+    expect(existsSync(file('r2-never-2.json'))).toBe(false);
+  }, 120_000);
 
   it('refuses decisions that no longer match the bundle, and a wrong passphrase', () => {
     writeFileSync(file('other-passphrase'), 'not-the-passphrase', { mode: 0o600 });

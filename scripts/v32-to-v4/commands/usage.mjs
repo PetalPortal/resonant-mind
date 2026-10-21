@@ -62,6 +62,9 @@ the command line); a passphrase is always a file (--passphrase-file). Options in
 
 ${sections.join('\n\n')}
 
+Exit codes: 0 success; 1 unexpected internal failure; 2 refusal (for status, a refused state). status also exits 3
+for a report that carries no seal: it is read for what it claims and proves nothing.
+
 Interrupted pre-commit runs are not auto-resumed; restart against a fresh target.
 `;
 }

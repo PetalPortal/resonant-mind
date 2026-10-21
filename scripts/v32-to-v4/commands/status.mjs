@@ -7,6 +7,14 @@ import { parseOptions, refuseArgument } from './shared.mjs';
 
 const PHASE = 'status';
 
+/**
+ * Exit codes of `status`, so a script can gate on them: 0 only for a report whose hash and seal verify and
+ * whose state is not a refusal; 2 for a refused state (the same code as every other refusal); 3 for a report
+ * the command cannot verify (it carries no seal), which is read for what it claims and never proves anything.
+ */
+export const STATUS_EXIT_CODES = Object.freeze({ verified: 0, refused: 2, unverified: 3 });
+export function statusExitCode(result) { return result?.status === 'refused' ? STATUS_EXIT_CODES.refused : result?.status === 'unverified' ? STATUS_EXIT_CODES.unverified : STATUS_EXIT_CODES.verified; }
+
 export function parseStatusArgs(argv) {
   const values = parseOptions(PHASE, argv, { required: ['--report'], optional: ['--cutover-evidence', '--passphrase-file'], switches: ['--operator-cutover-ack'] });
   return { reportPath: values['--report'], evidencePath: values['--cutover-evidence'], passphraseFile: values['--passphrase-file'], ack: values['--operator-cutover-ack'] === true };
@@ -57,13 +65,19 @@ export function statusCommand({ report, reportPath, evidence, evidencePath, pass
     ...summary,
   };
 }
+/** What the image state rests on, in words: the tool re-reading objects is not the tool seeing the original, and a signature is not the tool seeing anything. */
+function imagesNote(basis) {
+  if (basis.images === 'tool-rehashed-objects') return ` (the tool re-hashed the target objects and they match ${basis.images_fingerprint === 'plan' ? 'the values the plan states' : basis.images_fingerprint === 'copy-time-receipt' ? 'the fingerprint recorded when they were copied, not a check of the original sources now' : 'the plan and the fingerprint recorded when they were copied'})`;
+  if (basis.images === 'signed-receipt-attested') return ' (attested by a signed receipt, not observed by the tool)';
+  return '';
+}
 export function humanStatusResult(result) {
-  if (result.status === 'unverified') return `status: unverified (NOT proof; the report claimed ${result.claimed_status ?? 'nothing'}); report_sha256=${result.report_sha256 ?? 'none'}; ${result.reason}\n`;
+  if (result.status === 'unverified') return `status: unverified (NOT proof; the report claimed ${result.claimed_status ?? 'nothing'}); exit code ${STATUS_EXIT_CODES.unverified}; report_sha256=${result.report_sha256 ?? 'none'}; ${result.reason}\n`;
   if (result.report_verified === false) return `status: ${result.status}; report_sha256=${result.report_sha256 ?? 'none'}; ${result.reason}\n`;
   const basis = result.basis ?? {};
   const target = typeof result.target_identity_sha256 === 'string' ? `target ${result.target_identity_sha256.slice(0, 16)}` : 'a target the report does not identify';
   const when = typeof result.validated_at === 'string' ? result.validated_at : 'a time the report does not record';
   return `status: ${result.status}; report_verified=true; report_sha256=${result.report_sha256 ?? 'none'}; as_of_validation=true; validated_at=${result.validated_at ?? 'unknown'}; current_target_checked=false; `
     + `This is what validate proved at ${when} for ${target}; status does not look at the target, so it is not a check of the target now. Only running validate again checks the current target. `
-    + `Rests on: relational=${basis.relational}; images=${basis.images}; reembedding=${basis.reembed}${basis.reembed === 'attested-by-receipts' ? ' (attested by receipts, not observed)' : ''}; cutover=${basis.cutover}${basis.cutover === 'attested-by-operator' ? ' (the operator\'s statement, not observed)' : ''}.\n`;
+    + `Rests on: relational=${basis.relational}; images=${basis.images}${imagesNote(basis)}; reembedding=${basis.reembed}${basis.reembed === 'attested-by-receipts' ? ' (attested by receipts, not observed)' : ''}; cutover=${basis.cutover}${basis.cutover === 'attested-by-operator' ? ' (the operator\'s statement, not observed)' : ''}.\n`;
 }

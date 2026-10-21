@@ -93,16 +93,43 @@ export function reembedTargetRows({ jobs, members, images, targetTables, columnT
   return rows;
 }
 
-/** Whether the objects the tool re-read from the operator's image directory are exactly the planned ones; findings name a key only by its hash. */
-function checkObservedObjects({ inventory, observed, findings }) {
+const known = (value) => value !== null && value !== undefined;
+
+/**
+ * Whether the objects the tool re-read from the operator's image directory are the ones that were copied;
+ * findings name a key only by its hash. Each object is held to the plan's value where the plan states one,
+ * and otherwise to the fingerprint the copy receipt records for it (`fingerprints`, from a receipt that has
+ * already passed its own checks; null when it did not, in which case an object that cannot be compared is not
+ * complete and the receipt is already a finding). A v3.2 source stores no hash, so there the receipt's
+ * fingerprint is all there is: the tool shows that the objects are what the copy recorded, not what the
+ * source holds today.
+ */
+function checkObservedObjects({ inventory, observed, fingerprints, findings }) {
   let ok = true;
   for (const entry of inventory.entries) {
     const seen = observed?.[entry.target_key];
     const keyHash = canonicalSha256(entry.target_key);
     if (seen === undefined || seen === null || seen.missing === true) { ok = false; findings.add('image-object-missing-in-target-dir', { key_sha256: keyHash }); continue; }
-    if (seen.sha256 !== entry.expected_sha256 || Number(seen.size) !== Number(entry.expected_size) || String(seen.mime).toLowerCase() !== String(entry.expected_mime).toLowerCase()) { ok = false; findings.add('image-object-differs-from-plan', { key_sha256: keyHash }); }
+    const recorded = fingerprints?.[entry.target_key];
+    let differsFromPlan = false; let differsFromReceipt = false; let comparable = true;
+    for (const [field, planned] of [['sha256', entry.expected_sha256], ['size', entry.expected_size], ['mime', entry.expected_mime]]) {
+      const actual = field === 'size' ? Number(seen.size) : field === 'mime' ? String(seen.mime).toLowerCase() : seen.sha256;
+      if (known(planned)) { if ((field === 'size' ? Number(planned) : field === 'mime' ? String(planned).toLowerCase() : planned) !== actual) differsFromPlan = true; }
+      else if (recorded === undefined) comparable = false;
+      else if (recorded[field] !== actual) differsFromReceipt = true;
+    }
+    if (differsFromPlan) findings.add('image-object-differs-from-plan', { key_sha256: keyHash });
+    if (differsFromReceipt) findings.add('image-object-differs-from-copy-fingerprint', { key_sha256: keyHash });
+    if (differsFromPlan || differsFromReceipt || !comparable) ok = false;
   }
   return ok;
+}
+
+/** How the expected values of the planned objects are pinned: by the plan itself, or only by the fingerprint a receipt records. */
+function expectedValueSources(inventory, fingerprints) {
+  let fromPlan = 0; let fromReceipt = 0;
+  for (const entry of inventory.entries) { if (known(entry.expected_sha256) && known(entry.expected_size) && known(entry.expected_mime)) fromPlan += 1; else if (fingerprints?.[entry.target_key] !== undefined) fromReceipt += 1; }
+  return { from_plan: fromPlan, from_receipt_fingerprint: fromReceipt };
 }
 
 /**
@@ -117,11 +144,12 @@ function checkObservedObjects({ inventory, observed, findings }) {
 export function checkExternalEvidence({ derived, files, migrationId, live, findings }) {
   const inventory = derived.imageInventory;
   const result = {
-    images: { planned: inventory.entries.length, evidence_supplied: false, complete: false, receipt_sha256: null, basis: 'not-complete', objects_rehashed_by_tool: false, receipt_signature_verified: false, signature_required: null },
+    images: { planned: inventory.entries.length, evidence_supplied: false, complete: false, receipt_sha256: null, basis: 'not-complete', objects_rehashed_by_tool: false, receipt_signature_verified: false, signature_required: null, expected_values: null },
     reembed: { planned: derived.reembedPlan.jobs.length, evidence_supplied: false, complete: false, receipt_sha256: null, basis: 'not-complete', observed_by_tool: false, held_to_model: null, held_to_dimension: null },
   };
 
   // Images.
+  let imageFingerprints;
   const imageCount = supplied(files.imagePlan, files.imageReceipt);
   if (imageCount === 0) { result.images.complete = result.images.planned === 0; if (result.images.complete) result.images.basis = 'nothing-planned'; }
   else if (imageCount === 1) findings.add('external-image-evidence-incomplete', { detail: 'both --image-plan and --image-receipt are needed' });
@@ -137,20 +165,25 @@ export function checkExternalEvidence({ derived, files, migrationId, live, findi
     const listed = new Set((Array.isArray(files.imagePlan?.entries) ? files.imagePlan.entries : []).map((entry) => String(entry?.linked_target_ids?.image_id)));
     for (const id of stored) if (!listed.has(id)) { bound = false; findings.add('image-row-not-in-image-plan', {}); }
     for (const id of listed) if (!stored.has(id)) { bound = false; findings.add('image-plan-entry-without-row', {}); }
-    // what the tool saw of the objects themselves, when the operator let it look
-    const toolObservedObjects = files.imageObjects !== undefined;
-    if (toolObservedObjects && !checkObservedObjects({ inventory, observed: files.imageObjects.observed, findings })) bound = false;
     // whether a signature is needed is the operator's invocation, never a field of the receipt
+    const toolObservedObjects = files.imageObjects !== undefined;
     const requireSignature = imageSignatureRequired({ trustedPublicKey: files.trustedPublicKey, toolObservedObjects });
     result.images.signature_required = requireSignature;
+    let checked = null;
     try {
-      const checked = validateImageReceipt({ plan: files.imagePlan, receipt: files.imageReceipt, migrationId, requireSignature, trustedPublicKey: files.trustedPublicKey });
+      checked = validateImageReceipt({ plan: files.imagePlan, receipt: files.imageReceipt, migrationId, requireSignature, trustedPublicKey: files.trustedPublicKey });
+    } catch (error) { findings.add('external-image-receipt-invalid', { code: error instanceof MigrationRefusal ? error.code : 'invalid', signature_required: requireSignature, trusted_key_configured: files.trustedPublicKey !== undefined, ...(error instanceof MigrationRefusal && error.safe_details?.problems !== undefined ? { reasons: Object.keys(error.safe_details.problems).sort().join(',') } : {}) }); }
+    // what the tool saw of the objects themselves, when the operator let it look
+    if (toolObservedObjects && !checkObservedObjects({ inventory, observed: files.imageObjects.observed, fingerprints: checked?.fingerprints, findings })) bound = false;
+    if (checked !== null) {
+      if (bound) imageFingerprints = checked.fingerprints;
       result.images.complete = bound;
       result.images.receipt_sha256 = checked.receipt_sha256;
       result.images.receipt_signature_verified = checked.signature_verified === true;
       result.images.objects_rehashed_by_tool = toolObservedObjects && bound;
+      result.images.expected_values = expectedValueSources(inventory, checked.fingerprints);
       if (bound) result.images.basis = toolObservedObjects ? 'tool-rehashed-objects' : 'signed-receipt-attested';
-    } catch (error) { findings.add('external-image-receipt-invalid', { code: error instanceof MigrationRefusal ? error.code : 'invalid', signature_required: requireSignature, trusted_key_configured: files.trustedPublicKey !== undefined }); }
+    }
   }
 
   // Re-embedding.
@@ -178,6 +211,7 @@ export function checkExternalEvidence({ derived, files, migrationId, live, findi
           migrationId,
           expectedModel,
           expectedDimension,
+          imageFingerprints,
           targetRows: reembedTargetRows({ jobs: files.reembedPlan?.jobs ?? [], members: derived.members, images: inventory, targetTables: live.tables, columnTypes: live.columnTypes, columnDefaults: live.columnDefaults, importedAt: live.importedAt }),
         });
         result.reembed.complete = bound;

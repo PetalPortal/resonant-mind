@@ -60,14 +60,19 @@ export function validateOperatorCutoverEvidence({ report, evidence } = {}) {
 /**
  * What each part of a state rests on, in plain terms: what the tool verified itself and what it is relying on
  * someone else's word for. Re-embedding and the cutover are always attested (the tool cannot observe either);
- * images are tool-verified only when the tool re-hashed the objects, and attested when only a signed receipt
- * says they were copied.
+ * images are `tool-rehashed-objects` only when the tool re-read the copied objects itself, and
+ * `signed-receipt-attested` when only a signature the operator trusts says they were copied. Neither is a
+ * check of the original source: `images_fingerprint` says what the objects were held to, the values the plan
+ * itself states ('plan'), or only the fingerprint a copy receipt recorded ('copy-time-receipt', which is all
+ * there is for a v3.2 source, whose images table stores no hash, size or MIME type).
  */
 export function stateBasis(report, { cutoverEvidenceAccepted = false } = {}) {
   const relational = report?.relational_reconciliation_complete === true && report?.dry_run_receipt_complete === true && report?.import_receipt_complete === true ? 'verified-by-tool' : 'not-established';
-  const imageBasis = report?.images_complete !== true ? 'pending' : report?.images?.basis === 'tool-rehashed-objects' ? 'verified-by-tool' : report?.images?.basis === 'nothing-planned' ? 'nothing-planned' : report?.images?.basis === 'signed-receipt-attested' ? 'attested-by-signed-receipt' : 'complete-basis-not-recorded';
+  const imageBasis = report?.images_complete !== true ? 'pending' : report?.images?.basis === 'tool-rehashed-objects' ? 'tool-rehashed-objects' : report?.images?.basis === 'nothing-planned' ? 'nothing-planned' : report?.images?.basis === 'signed-receipt-attested' ? 'signed-receipt-attested' : 'complete-basis-not-recorded';
   const reembed = report?.reembed_complete !== true ? 'pending' : report?.reembed?.basis === 'nothing-planned' ? 'nothing-planned' : report?.reembed?.basis === 'receipts-attested' ? 'attested-by-receipts' : 'complete-basis-not-recorded';
-  return { relational, images: imageBasis, reembed, cutover: cutoverEvidenceAccepted ? 'attested-by-operator' : 'none' };
+  const values = report?.images?.expected_values;
+  const imagesFingerprint = report?.images_complete !== true || imageBasis === 'nothing-planned' ? 'none' : values === undefined || values === null ? 'not-recorded' : values.from_receipt_fingerprint === 0 ? 'plan' : values.from_plan === 0 ? 'copy-time-receipt' : 'plan-and-copy-time-receipt';
+  return { relational, images: imageBasis, images_fingerprint: imagesFingerprint, reembed, cutover: cutoverEvidenceAccepted ? 'attested-by-operator' : 'none' };
 }
 export function determineMigrationStatus(report, { operatorCutoverEvidence, requireReportHash = true } = {}) {
   if (report?.refusal || report?.violations?.length || !report || requireReportHash && report.report_sha256 !== reportBodyHash(report)) return 'refused';
@@ -85,9 +90,9 @@ export function reconcileMigration({ source, exported, staged, target, decisions
   if (source === undefined) throw refusal('Relational reconciliation requires a source snapshot.');
   const allowed = adjustmentKeys(decisions, losses); const sourceCounts = tableCounts(source); const exportCounts = tableCounts(exported); const stageCounts = tableCounts(staged); const targetCounts = tableCounts(target);
   const violations = [...boundaryDiff(source, exported, 'exported', allowed), ...boundaryDiff(source, staged, 'staged', allowed), ...boundaryDiff(source, target, 'target', allowed)];
-  let imageOk = false; let reembedOk = false;
-  if (!imagePlan || !imageReceipt) violations.push({ check: 'external-image-receipt-missing' }); else { try { validateImageReceipt({ plan: imagePlan, receipt: imageReceipt, migrationId, trustedPublicKey, requireSignature: imageSignatureRequired({ trustedPublicKey, toolObservedObjects: toolObservedImageObjects === true }) }); imageOk = true; } catch { violations.push({ check: 'external-image-receipt-invalid' }); } }
-  if (!reembedPlan || !reembedReceipts) violations.push({ check: 'external-reembed-receipt-missing' }); else { try { validateReembedReceipts({ plan: reembedPlan, receipts: reembedReceipts, migrationId, expectedModel, expectedDimension }); reembedOk = true; } catch { violations.push({ check: 'external-reembed-receipt-invalid' }); } }
+  let imageOk = false; let reembedOk = false; let imageFingerprints;
+  if (!imagePlan || !imageReceipt) violations.push({ check: 'external-image-receipt-missing' }); else { try { imageFingerprints = validateImageReceipt({ plan: imagePlan, receipt: imageReceipt, migrationId, trustedPublicKey, requireSignature: imageSignatureRequired({ trustedPublicKey, toolObservedObjects: toolObservedImageObjects === true }) }).fingerprints; imageOk = true; } catch { violations.push({ check: 'external-image-receipt-invalid' }); } }
+  if (!reembedPlan || !reembedReceipts) violations.push({ check: 'external-reembed-receipt-missing' }); else { try { validateReembedReceipts({ plan: reembedPlan, receipts: reembedReceipts, migrationId, expectedModel, expectedDimension, imageFingerprints }); reembedOk = true; } catch { violations.push({ check: 'external-reembed-receipt-invalid' }); } }
   const dryRunOk = successfulReceipt(dryRunReceipt, ['validated', 'complete'], { migrationId, kind: 'fresh-v4-dry-run' }); const importOk = successfulReceipt(importReceipt, ['complete', 'imported'], { migrationId, kind: 'fresh-v4-import', dryRunReceipt }); if (!dryRunOk) violations.push({ check: 'dry-run-receipt-invalid' }); if (!importOk) violations.push({ check: 'import-receipt-invalid' });
   const report = { format_version: 1, report_type: 'migration-reconciliation', migration_id: migrationId ?? null, counts: { source: sourceCounts, exported: exportCounts, staged: stageCounts, target: targetCounts }, row_hashes: { source: canonicalSha256(rowHashes(source)), exported: exported === undefined ? null : canonicalSha256(rowHashes(exported)), staged: staged === undefined ? null : canonicalSha256(rowHashes(staged)), target: target === undefined ? null : canonicalSha256(rowHashes(target)) }, decisions: { count: decisions.length, sha256: canonicalSha256(decisions) }, losses: { count: losses.length, sha256: canonicalSha256(losses) }, target_present: target !== undefined, exported: exported !== undefined, dry_run_accepted: dryRunOk, imported: importOk, dry_run_receipt_complete: dryRunOk, import_receipt_complete: importOk, relational_reconciliation_complete: violations.filter(({ check }) => ['missing-input', 'extra-row', 'missing-row', 'row-hash-mismatch', 'count-mismatch'].includes(check)).length === 0 && dryRunOk && importOk, images: { planned: imagePlan?.entries?.length ?? 0, receipt_sha256: receiptHash(imageReceipt) }, reembed: { planned: reembedPlan?.jobs?.length ?? 0, receipt_sha256: receiptHash(reembedReceipts) }, images_complete: imageOk, reembed_complete: reembedOk, violations };
   report.status = determineMigrationStatus(report, { requireReportHash: false }); report.report_sha256 = canonicalSha256(report); return report;

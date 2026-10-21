@@ -1,4 +1,5 @@
-import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
@@ -11,6 +12,10 @@ import { transformRelational } from '../../scripts/v32-to-v4/transform/relationa
 import { inspectTarget, prepareTarget, dryRunStaging, importPlan, readTargetIdentity } from '../../scripts/v32-to-v4/target/postgres.mjs';
 import { createV4MigrationRunner } from '../../scripts/migrate-postgres.mjs';
 import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
+import { FilesystemObjectStore, copyImagePlan } from '../../scripts/v32-to-v4/external/filesystem-store.mjs';
+import { observeImageObjects } from '../../scripts/v32-to-v4/commands/validate.mjs';
+import { Findings } from '../../scripts/v32-to-v4/validate/compare.mjs';
+import { checkExternalEvidence } from '../../scripts/v32-to-v4/validate/external-evidence.mjs';
 import { LONG, RICH_POSTGRES_SEED as SEED } from './helpers/seeds.mjs';
 
 // A second, richer live run than e2e-postgres.integration.test.mjs: every v3.2 table has rows, with
@@ -191,6 +196,24 @@ describe.skipIf(!runE2E)('real PostgreSQL v3.2 with every table populated to fre
         expect(JSON.stringify(plan)).not.toMatch(/0\.125/u);
         const lost = plan.losses.map((loss) => `${loss.kind}:${loss.source_table}.${loss.field}`);
         expect(lost).toEqual(expect.arrayContaining(['dropped-field:observations.charge_note', 'dropped-field:entities.intentionally_isolated', 'dropped-field:embeddings.embedding', 'null-replaced-by-v4-default:entities.updated_at']));
+
+        // The one image. v3.2 keeps its path and nothing about the object, so the plan states no hash, size or type;
+        // the tool fingerprints what it copies, and the copy is what the target's images row and its evidence rest on.
+        const imagePlan = plan.image_inventory;
+        expect(imagePlan.entries).toHaveLength(1);
+        expect(imagePlan.entries[0]).toMatchObject({ source_logical_path: 'images/one.png', expected_sha256: null, expected_size: null, expected_mime: null });
+        const picture = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from('the rich seed picture')]);
+        const pictureSource = join(root, 'picture-source'); const pictureTarget = join(root, 'picture-target');
+        mkdirSync(join(pictureSource, 'images'), { recursive: true }); mkdirSync(pictureTarget);
+        writeFileSync(join(pictureSource, 'images', 'one.png'), picture);
+        const copied = await copyImagePlan({ plan: imagePlan, sourceStore: new FilesystemObjectStore(pictureSource), targetStore: new FilesystemObjectStore(pictureTarget) });
+        expect(copied.entries[0].source_fingerprint).toEqual({ sha256: createHash('sha256').update(picture).digest('hex'), size: picture.length, mime: 'image/png' });
+        const imageRows = (await targetClient.query('SELECT id FROM images')).rows;
+        expect(imageRows.map((row) => String(row.id))).toEqual([String(imagePlan.entries[0].linked_target_ids.image_id)]);
+        const findings = new Findings();
+        const evidence = checkExternalEvidence({ derived: { members: plan.members, imageInventory: imagePlan, reembedPlan: plan.reembed_jobs }, files: { imagePlan, imageReceipt: copied, imageObjects: observeImageObjects(pictureTarget, imagePlan) }, migrationId: plan.migration_id, live: { tables: { images: imageRows }, columnTypes: {}, columnDefaults: {}, embeddingDimension: 768, importedAt: null }, findings });
+        expect(findings.counts).toEqual({});
+        expect(evidence.images).toMatchObject({ complete: true, basis: 'tool-rehashed-objects', expected_values: { from_plan: 0, from_receipt_fingerprint: 1 } });
       } finally {
         await sourceRead.end();
       }

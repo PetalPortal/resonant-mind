@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
@@ -12,7 +12,7 @@ import { compilePolicy } from '../../scripts/v32-to-v4/policy/compile.mjs';
 import { transformRelational } from '../../scripts/v32-to-v4/transform/relational.mjs';
 import { inspectTarget, prepareTarget, dryRunStaging, importPlan } from '../../scripts/v32-to-v4/target/postgres.mjs';
 import { createV4MigrationRunner, migrationSetSha256, readV4Migrations } from '../../scripts/migrate-postgres.mjs';
-import { buildImageInventory } from '../../scripts/v32-to-v4/external/images.mjs';
+import { FilesystemObjectStore, copyImagePlan } from '../../scripts/v32-to-v4/external/filesystem-store.mjs';
 import { buildDryRunReport } from '../../scripts/v32-to-v4/target/postgres.mjs';
 import { reconcileMigration } from '../../scripts/v32-to-v4/validate/reconcile.mjs';
 import { canonicalSha256 } from '../../scripts/v32-to-v4/lib/hash.mjs';
@@ -84,6 +84,8 @@ describe.skipIf(!runE2E)('real PostgreSQL/pgvector v3.2 to fresh-v4 E2E', () => 
       await sourceClient.query(readFileSync(fixture, 'utf8'));
       await sourceClient.query("INSERT INTO entities (name, entity_type, primary_context) VALUES ('CI synthetic person', 'person', 'default')");
       await sourceClient.query("INSERT INTO observations (entity_id, content, context) SELECT id, 'CI synthetic migration proof', 'default' FROM entities WHERE name = 'CI synthetic person'");
+      // v3.2 keeps a path for an image and nothing else about the object
+      await sourceClient.query("INSERT INTO images (path, description, context, entity_id, observation_id) SELECT 'images/ci-synthetic.png', 'a synthetic picture', 'default', e.id, o.id FROM entities e, observations o WHERE e.name = 'CI synthetic person' AND o.entity_id = e.id");
       await sourceClient.end(); sourceClient = undefined;
 
       process.env.TEST_E2E_SOURCE_URL = sourceUrl;
@@ -110,13 +112,20 @@ describe.skipIf(!runE2E)('real PostgreSQL/pgvector v3.2 to fresh-v4 E2E', () => 
       const counts = await targetClient.query("SELECT (SELECT count(*)::int FROM public.entities) AS entities, (SELECT count(*)::int FROM public.observations) AS observations");
       expect(counts.rows[0]).toMatchObject({ entities: 1, observations: 1 });
 
-      const imagePlan = buildImageInventory({ images: [], migrationId: plan.migration_id, bundleManifestSha256: plan.bundle_manifest_sha256, compiledPolicySha256: plan.compiled_policy_sha256 });
-      const imageReceipt = { format_version: 1, receipt_type: 'image-copy', status: 'complete', migration_id: imagePlan.migration_id, plan_sha256: imagePlan.plan_sha256, bundle_manifest_sha256: imagePlan.bundle_manifest_sha256, compiled_policy_sha256: imagePlan.compiled_policy_sha256, entries: [] };
+      // the image: the plan states no hash, size or type, so the tool fingerprints what it copies
+      const imagePlan = plan.image_inventory;
+      expect(imagePlan.entries).toHaveLength(1);
+      expect(imagePlan.entries[0]).toMatchObject({ expected_sha256: null, expected_size: null, expected_mime: null });
+      const pictureSource = join(root, 'picture-source'); const pictureTarget = join(root, 'picture-target');
+      mkdirSync(join(pictureSource, 'images'), { recursive: true }); mkdirSync(pictureTarget);
+      writeFileSync(join(pictureSource, 'images', 'ci-synthetic.png'), Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.from('a synthetic picture')]));
+      const imageReceipt = await copyImagePlan({ plan: imagePlan, sourceStore: new FilesystemObjectStore(pictureSource), targetStore: new FilesystemObjectStore(pictureTarget) });
+      expect(imageReceipt.entries[0]).toMatchObject({ mime: 'image/png', verified: true });
       const reembedPlan = plan.reembed_jobs;
       const targetSnapshot = plan.members;
       const missingExternal = reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'synthetic-ci-model', expectedDimension: 3, source: targetSnapshot, exported: targetSnapshot, staged: targetSnapshot, target: targetSnapshot, imagePlan, imageReceipt, reembedPlan, dryRunReceipt: dryRun, importReceipt: imported, migrationId });
       expect(missingExternal.status).toBe('refused');
-      const reembedReceipts = { format_version: 1, migration_id: reembedPlan.migration_id, plan_sha256: reembedPlan.plan_sha256, bundle_manifest_sha256: reembedPlan.bundle_manifest_sha256, compiled_policy_sha256: reembedPlan.compiled_policy_sha256, receipts: reembedPlan.jobs.map((job) => ({ job_id: job.job_id, migration_id: job.migration_id, plan_sha256: reembedPlan.plan_sha256, bundle_manifest_sha256: reembedPlan.bundle_manifest_sha256, compiled_policy_sha256: reembedPlan.compiled_policy_sha256, target_locator: job.target_locator, status: 'complete', model: 'synthetic-ci-model', dimension: 3, content_hash: job.content_hash })) };
+      const reembedReceipts = { format_version: 1, migration_id: reembedPlan.migration_id, plan_sha256: reembedPlan.plan_sha256, bundle_manifest_sha256: reembedPlan.bundle_manifest_sha256, compiled_policy_sha256: reembedPlan.compiled_policy_sha256, receipts: reembedPlan.jobs.map((job) => ({ job_id: job.job_id, migration_id: job.migration_id, plan_sha256: reembedPlan.plan_sha256, bundle_manifest_sha256: reembedPlan.bundle_manifest_sha256, compiled_policy_sha256: reembedPlan.compiled_policy_sha256, target_locator: job.target_locator, status: 'complete', model: 'synthetic-ci-model', dimension: 3, content_hash: job.content_hash, ...(job.modality === 'image' ? { source_logical_path: job.source_logical_path, target_key: job.target_key, object_sha256: imageReceipt.entries[0].sha256, source_sha256: imageReceipt.entries[0].sha256, object_size: imageReceipt.entries[0].size, object_mime: imageReceipt.entries[0].mime } : {}) })) };
       const report = reconcileMigration({ toolObservedImageObjects: true, expectedModel: 'synthetic-ci-model', expectedDimension: 3, source: targetSnapshot, exported: targetSnapshot, staged: targetSnapshot, target: targetSnapshot, imagePlan, imageReceipt, reembedPlan, reembedReceipts, dryRunReceipt: dryRun, importReceipt: imported, migrationId });
       expect(report.status).toBe('ready-for-cutover');
       expect(dryRun.receipt_sha256).toBe(buildDryRunReport({ plan: { ...plan, migration_set_sha256: setHash }, targetIdentity: target, migrationSetSha256: dryRun.migration_set_sha256, migratorVersion: dryRun.migrator_version, stageContentSha256: dryRun.stage_content_sha256, targetStateSha256: dryRun.target_state_sha256 }).receipt_sha256);

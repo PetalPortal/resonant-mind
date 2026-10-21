@@ -38,8 +38,14 @@ function exactLocator(left, right) { return left?.table === right?.table && Stri
  * `expectedModel` (the embedding model the v4 deployment is configured for, which the operator states) and
  * `expectedDimension` (the dimension of the target's own embeddings.embedding column, which validate reads)
  * are required: a receipt set that only agrees with itself on a model and a dimension is refused.
+ *
+ * An image job's receipt must name the object that was embedded (SHA-256, size, MIME type), and it must be the
+ * object that was copied. Where the plan states the object's values (a source that stores them) the receipt is
+ * held to those. A v3.2 source stores none, so the job states none, and the receipt is held to the fingerprint
+ * of the copy (`imageFingerprints`, by target key, from an image receipt that has passed its own checks). With
+ * no such fingerprint an image job cannot be verified, and it is not complete.
  */
-export function validateReembedReceipts({ plan, receipts, targetRows, expectedModel, expectedDimension, migrationId = plan?.migration_id, bundleManifestSha256 = plan?.bundle_manifest_sha256, compiledPolicySha256 = plan?.compiled_policy_sha256 } = {}) {
+export function validateReembedReceipts({ plan, receipts, targetRows, expectedModel, expectedDimension, imageFingerprints, migrationId = plan?.migration_id, bundleManifestSha256 = plan?.bundle_manifest_sha256, compiledPolicySha256 = plan?.compiled_policy_sha256 } = {}) {
   if (typeof expectedModel !== 'string' || expectedModel.length === 0 || !Number.isSafeInteger(expectedDimension) || expectedDimension < 1) throw refuse('Re-embedding receipts can only be checked against the embedding model and dimension the v4 target is configured for; both are required.');
   if (!plan || plan.plan_type !== 'reembed-job-plan' || plan.plan_sha256 !== planHash(plan)) throw refuse('Re-embedding job plan hash is missing or invalid.');
   if (plan.legacy_vectors_imported === true) throw refuse('Legacy vectors are present in the re-embedding plan.');
@@ -60,7 +66,10 @@ export function validateReembedReceipts({ plan, receipts, targetRows, expectedMo
     if (receipt.status !== 'complete' || !exactLocator(receipt.target_locator, job.target_locator)) { problems.push({ job_id: job.job_id, reason: 'status-or-target-locator' }); continue; }
     if (receipt.content_hash !== job.content_hash) problems.push({ job_id: job.job_id, reason: 'content-hash-mismatch' });
     if (job.modality === 'image') {
-      if (!job.object_sha256 || !Number.isSafeInteger(Number(job.object_size)) || typeof job.object_mime !== 'string' || receipt.source_logical_path !== job.source_logical_path || receipt.target_key !== job.target_key || receipt.object_sha256 !== job.object_sha256 || receipt.object_sha256 !== receipt.source_sha256 || Number(receipt.object_size) !== Number(job.object_size) || receipt.object_mime !== job.object_mime) problems.push({ job_id: job.job_id, reason: 'object-binding-mismatch' });
+      const stated = job.object_sha256 !== null && job.object_sha256 !== undefined && job.object_size !== null && job.object_size !== undefined && job.object_mime !== null && job.object_mime !== undefined;
+      const object = stated ? { sha256: job.object_sha256, size: Number(job.object_size), mime: job.object_mime } : imageFingerprints?.[job.target_key];
+      if (object === undefined) problems.push({ job_id: job.job_id, reason: 'object-binding-unverifiable' });
+      else if (typeof object.sha256 !== 'string' || object.sha256.length === 0 || !Number.isSafeInteger(Number(object.size)) || typeof object.mime !== 'string' || receipt.source_logical_path !== job.source_logical_path || receipt.target_key !== job.target_key || receipt.object_sha256 !== object.sha256 || receipt.object_sha256 !== receipt.source_sha256 || Number(receipt.object_size) !== Number(object.size) || String(receipt.object_mime).toLowerCase() !== object.mime.toLowerCase()) problems.push({ job_id: job.job_id, reason: 'object-binding-mismatch' });
     }
     const model = receipt.model ?? receipt.model_id; const dimension = receipt.dimension ?? receipt.vector_dimension;
     if (typeof model !== 'string' || model.length === 0) problems.push({ job_id: job.job_id, reason: 'model-missing' }); else if (receiptModel === undefined) receiptModel = model; else if (receiptModel !== model) problems.push({ job_id: job.job_id, reason: 'model-inconsistent' });

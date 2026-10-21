@@ -56,6 +56,7 @@ describe('v3.2 to v4 migration CLI', () => {
     for (const command of commands) expect(help, command).toMatch(new RegExp(`^  ${command} +[-\[(]`, 'mu'));
     for (const option of ['--source-kind', '--passphrase-file', '--reviewed-by', '--compiled-policy', '--staging-schema', '--receipt-out', '--dry-run', '--bundle-manifest-sha256', '--compiled-policy-sha256', '--dry-run-receipt', '--import-receipt', '--reembed-receipts', '--image-receipt', '--operator-cutover-ack']) expect(help, option).toContain(option);
     expect(help).toContain('env:NAME');
+    expect(help).toContain('Exit codes: 0 success; 1 unexpected internal failure; 2 refusal (for status, a refused state). status also exits 3');
     const single = spawnCli(['validate', '--help']);
     expect(single.status).toBe(0);
     expect(single.stdout).toBe(usageFor('validate'));

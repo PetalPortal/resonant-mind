@@ -16,7 +16,7 @@ import { parsePlanImagesArgs, planImagesCommand, humanPlanImagesResult } from '.
 import { parseCopyImagesArgs, copyImagesCommand, humanCopyImagesResult } from './commands/copy-images.mjs';
 import { parsePlanReembedArgs, planReembedCommand, humanPlanReembedResult } from './commands/plan-reembed.mjs';
 import { parseValidateArgs, validateCommand, humanValidateResult } from './commands/validate.mjs';
-import { parseStatusArgs, statusCommand, humanStatusResult } from './commands/status.mjs';
+import { parseStatusArgs, statusCommand, statusExitCode, humanStatusResult } from './commands/status.mjs';
 import { draftDecisionsCommand, humanDraftDecisionsResult, parseDraftDecisionsArgs } from './commands/draft-decisions.mjs';
 import { applyDecisionsCommand, humanApplyDecisionsResult, parseApplyDecisionsArgs } from './commands/apply-decisions.mjs';
 import { humanPlanRelationalResult, parsePlanRelationalArgs, planRelationalCommand } from './commands/plan-relational.mjs';
@@ -153,7 +153,7 @@ function runMain({
     if (command === 'copy-images') return copyImagesCommand(parseCopyImagesArgs(commandArgs)).then((result) => { const checked = recordCheckpoint(result, 'images-complete'); writeStdout(json ? `${canonicalJson(checked)}\n` : humanCopyImagesResult(checked)); return 0; });
     if (command === 'plan-reembed') return Promise.resolve(planReembedCommand(parsePlanReembedArgs(commandArgs))).then((result) => { const checked = recordCheckpoint(result, 'reembed-complete'); writeStdout(json ? `${canonicalJson(checked)}\n` : humanPlanReembedResult(checked)); return 0; });
     if (command === 'validate') return Promise.resolve(validateCommand(parseValidateArgs(commandArgs))).then((result) => { const checked = recordCheckpoint(result, 'validation-complete'); writeStdout(json ? `${canonicalJson(checked)}\n` : humanValidateResult(checked)); return 0; });
-    if (command === 'status') return Promise.resolve(statusCommand({ ...parseStatusArgs(commandArgs), operatorCutoverAcknowledged: commandArgs.includes('--operator-cutover-ack') })).then((result) => { writeStdout(json ? `${canonicalJson(result)}\n` : humanStatusResult(result)); return result.status === 'refused' ? 2 : 0; });
+    if (command === 'status') return Promise.resolve(statusCommand({ ...parseStatusArgs(commandArgs), operatorCutoverAcknowledged: commandArgs.includes('--operator-cutover-ack') })).then((result) => { writeStdout(json ? `${canonicalJson(result)}\n` : humanStatusResult(result)); return statusExitCode(result); });
     if (command !== 'inspect-source') {
       throw new MigrationRefusal({
         code: 'RMIG-E-COMMAND-NOT-IMPLEMENTED',

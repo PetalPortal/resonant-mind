@@ -84,9 +84,48 @@ export function imageSignatureRequired({ trustedPublicKey, toolObservedObjects =
   return !(toolObservedObjects === true && !trustedPublicKey);
 }
 
+const set = (value) => value !== null && value !== undefined;
+
+/**
+ * Why one receipt entry does not cover its planned object, or null when it does. The reasons are fixed words
+ * (never a value from the receipt); a refusal lists each with the number of entries it applies to.
+ *
+ * The values the entry states for the object (SHA-256, size, MIME type) are required whatever the plan holds:
+ * they are the fingerprint, the values someone observed. A v3.2 source stores none of them, so its plan states
+ * none, and the receipt's fingerprint is what everything after it is held to; where the plan does state a value
+ * (a source that stores them) the receipt must say the same. An entry is bound to its planned row by the exact
+ * key, source path and locator the plan gives it (and by the row's id where the entry names one).
+ */
+function entryProblem(item, actual) {
+  if (!actual) return 'no-receipt-entry';
+  if (!sourceMapping(actual, item)) return 'not-bound-to-the-planned-object';
+  if (actual.verified !== true) return 'not-verified';
+  if (actual.target_locator?.store !== item.target_locator?.store || actual.target_locator?.key !== item.target_locator?.key) return 'locator-differs';
+  if (actual.image_id !== undefined && String(actual.image_id) !== String(item.linked_target_ids?.image_id)) return 'bound-to-another-row';
+  if (actual.source_id !== undefined && String(actual.source_id) !== String(item.source_id)) return 'bound-to-another-row';
+  let seen;
+  try { seen = { sha256: digest(actual.sha256, 'Image receipt SHA-256'), size: expectedSize(actual.size), mime: expectedMime(actual.mime) }; } catch { return 'fingerprint-missing-or-malformed'; }
+  if (actual.source_sha256 !== seen.sha256) return 'source-hash-differs-from-the-copy';
+  if (actual.source_fingerprint !== undefined) {
+    let stated;
+    try { stated = { sha256: digest(actual.source_fingerprint?.sha256, 'Image receipt source SHA-256'), size: expectedSize(actual.source_fingerprint?.size), mime: expectedMime(actual.source_fingerprint?.mime) }; } catch { return 'source-fingerprint-malformed'; }
+    if (stated.sha256 !== seen.sha256 || stated.size !== seen.size || stated.mime !== seen.mime) return 'source-fingerprint-differs-from-the-copy';
+  }
+  try {
+    if (set(item.expected_sha256) && digest(item.expected_sha256, 'Image plan expected SHA-256') !== seen.sha256) return 'differs-from-the-plan';
+    if (set(item.expected_size) && expectedSize(item.expected_size) !== seen.size) return 'differs-from-the-plan';
+    if (set(item.expected_mime) && expectedMime(item.expected_mime) !== seen.mime) return 'differs-from-the-plan';
+  } catch { return 'plan-value-malformed'; }
+  return null;
+}
+
 /**
  * `requireSignature` is the caller's decision (see imageSignatureRequired) and defaults to true: nothing in
  * the receipt can switch it off.
+ *
+ * The result's `fingerprints` holds, for every planned object (by target key), the SHA-256, size and MIME type
+ * the receipt states for it, and `from_plan` when the plan itself stated all three (so the plan, not only the
+ * receipt, pins the object). validate holds the objects it re-reads to these.
  */
 export function validateImageReceipt({ plan, receipt, migrationId = plan?.migration_id, requireSignature = true, trustedPublicKey, trustedKey: configuredKey } = {}) {
   if (!plan || plan.plan_type !== 'image-inventory' || typeof plan.plan_sha256 !== 'string' || planHash(plan) !== plan.plan_sha256) throw refuse('Image inventory plan hash is missing or invalid.');
@@ -104,15 +143,19 @@ export function validateImageReceipt({ plan, receipt, migrationId = plan?.migrat
     if (!entry || typeof entry.target_key !== 'string' || byTarget.has(entry.target_key)) throw refuse('Image receipt contains a duplicate or invalid target object.');
     byTarget.set(entry.target_key, entry);
   }
-  const missing = [];
+  const problems = new Map();
+  const fingerprints = {};
   for (const item of expected) {
     const actual = byTarget.get(item.target_key);
-    try {
-      if (!actual || !sourceMapping(actual, item) || actual.verified !== true || actual.target_locator?.store !== item.target_locator?.store || actual.target_locator?.key !== item.target_locator?.key || digest(item.expected_sha256, 'Image plan expected SHA-256') !== actual.sha256 || actual.source_sha256 !== actual.sha256 || expectedSize(item.expected_size) !== expectedSize(actual.size) || expectedMime(item.expected_mime) !== expectedMime(actual.mime)) missing.push(item.target_key);
-    } catch { missing.push(item.target_key); }
+    const problem = entryProblem(item, actual);
+    if (problem !== null) { problems.set(problem, (problems.get(problem) ?? 0) + 1); continue; }
+    fingerprints[item.target_key] = { sha256: actual.sha256, size: Number(actual.size), mime: String(actual.mime).toLowerCase(), from_plan: set(item.expected_sha256) && set(item.expected_size) && set(item.expected_mime) };
   }
-  if (missing.length || [...byTarget.keys()].some((key) => !expected.some((item) => item.target_key === key))) throw refuse('External image receipt does not cover every planned object with exact source and target bindings.', { missing: missing.length });
-  return { complete: true, covered: expected.length, receipt_sha256: receipt.receipt_sha256 ?? receiptHash(receipt), signature_verified: requireSignature !== false };
+  const planned = new Set(expected.map((item) => item.target_key));
+  const unplanned = [...byTarget.keys()].filter((key) => !planned.has(key)).length;
+  if (unplanned > 0) problems.set('entry-for-an-unplanned-object', unplanned);
+  if (problems.size > 0) throw refuse('External image receipt does not cover every planned object with exact source and target bindings and a fingerprint for each.', { problems: Object.fromEntries([...problems].sort(([a], [b]) => a.localeCompare(b))) });
+  return { complete: true, covered: expected.length, receipt_sha256: receipt.receipt_sha256 ?? receiptHash(receipt), signature_verified: requireSignature !== false, fingerprints };
 }
 export const planImages = buildImageInventory;
 export { sniffMime as mimeFor, planHash, receiptHash, verifyOfflineSignature };

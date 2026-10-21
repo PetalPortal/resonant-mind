@@ -12,7 +12,7 @@ import { isSealed, openSealedJson, sealJson } from '../../scripts/v32-to-v4/lib/
 import { readArtifact, writeArtifactNew } from '../../scripts/v32-to-v4/commands/artifacts.mjs';
 import { MigrationRefusal } from '../../scripts/v32-to-v4/lib/refusal.mjs';
 import { sealReport } from '../../scripts/v32-to-v4/lib/report-seal.mjs';
-import { humanStatusResult, statusCommand } from '../../scripts/v32-to-v4/commands/status.mjs';
+import { STATUS_EXIT_CODES, humanStatusResult, statusCommand, statusExitCode } from '../../scripts/v32-to-v4/commands/status.mjs';
 import { observeImageObjects, parseValidateArgs } from '../../scripts/v32-to-v4/commands/validate.mjs';
 import { determineMigrationStatus, stateBasis } from '../../scripts/v32-to-v4/validate/reconcile.mjs';
 import { embeddingDimensionOf } from '../../scripts/v32-to-v4/validate/live-target.mjs';
@@ -237,10 +237,18 @@ describe('status says what it read, from when, and what each part rests on', () 
 
   it('names what is verified by the tool and what is only attested', () => {
     const ready = statusCommand({ report: report(), passphraseFile });
-    expect(ready.basis).toEqual({ relational: 'verified-by-tool', images: 'verified-by-tool', reembed: 'attested-by-receipts', cutover: 'none' });
+    expect(ready.basis).toEqual({ relational: 'verified-by-tool', images: 'tool-rehashed-objects', images_fingerprint: 'not-recorded', reembed: 'attested-by-receipts', cutover: 'none' });
     expect(humanStatusResult(ready)).toContain('reembedding=attested-by-receipts (attested by receipts, not observed); cutover=none');
     const signed = statusCommand({ report: report({ images: { basis: 'signed-receipt-attested' } }), passphraseFile });
-    expect(signed.basis.images).toBe('attested-by-signed-receipt');
+    expect(signed.basis.images).toBe('signed-receipt-attested');
+    expect(humanStatusResult(signed)).toContain('images=signed-receipt-attested (attested by a signed receipt, not observed by the tool)');
+    // the tool re-reading the objects is said to be that, and what it held them to
+    const recorded = statusCommand({ report: report({ images: { basis: 'tool-rehashed-objects', expected_values: { from_plan: 0, from_receipt_fingerprint: 2 } } }), passphraseFile });
+    expect(recorded.basis).toMatchObject({ images: 'tool-rehashed-objects', images_fingerprint: 'copy-time-receipt' });
+    expect(humanStatusResult(recorded)).toContain('images=tool-rehashed-objects (the tool re-hashed the target objects and they match the fingerprint recorded when they were copied, not a check of the original sources now)');
+    const planned = statusCommand({ report: report({ images: { basis: 'tool-rehashed-objects', expected_values: { from_plan: 2, from_receipt_fingerprint: 0 } } }), passphraseFile });
+    expect(planned.basis.images_fingerprint).toBe('plan');
+    expect(humanStatusResult(planned)).toContain('they match the values the plan states');
     expect(stateBasis(report({ images_complete: false, reembed_complete: false })).images).toBe('pending');
     expect(stateBasis(report({ images_complete: false, reembed_complete: false })).reembed).toBe('pending');
     expect(stateBasis({ relational_reconciliation_complete: false }).relational).toBe('not-established');
@@ -256,7 +264,7 @@ describe('status says what it read, from when, and what each part rests on', () 
     expect(humanStatusResult(result)).toContain("cutover=attested-by-operator (the operator's statement, not observed)");
   });
 
-  it('exits 0 for a state it could read and 2 for one it refused, through the CLI', () => {
+  it('exits 0 for a state it could read, 2 for one it refused and 3 for a report it cannot verify, through the CLI', () => {
     const sealed = report();
     const path = file('four-report.json', JSON.stringify(sealed));
     const ok = runCli(['status', '--report', path, '--passphrase-file', passphraseFile]);
@@ -268,6 +276,24 @@ describe('status says what it read, from when, and what each part rests on', () 
     const refused = runCli(['status', '--report', edited, '--passphrase-file', passphraseFile]);
     expect(refused.status).toBe(2);
     expect(refused.stdout).not.toContain('not a check of the target now');
+
+    // A report with no seal is read for what it claims and proves nothing: not 0, so a script that gates on the exit code stops, and not 2, which is a refusal
+    const { report_seal: _seal, ...unsealed } = sealed;
+    const unsealedPath = file('four-unsealed.json', JSON.stringify(unsealed));
+    const unverified = runCli(['status', '--report', unsealedPath, '--passphrase-file', passphraseFile]);
+    expect(unverified.status, unverified.output).toBe(3);
+    expect(unverified.stdout).toContain('status: unverified (NOT proof; the report claimed ready-for-cutover); exit code 3;');
+    const unverifiedJson = runCli(['status', '--report', unsealedPath, '--json']);
+    expect(unverifiedJson.status, unverifiedJson.output).toBe(3);
+    expect(JSON.parse(unverifiedJson.stdout)).toMatchObject({ status: 'unverified', report_verified: false, claimed_status: 'ready-for-cutover' });
+  });
+
+  it('has one exit code per outcome, and none of them is shared', () => {
+    expect(STATUS_EXIT_CODES).toEqual({ verified: 0, refused: 2, unverified: 3 });
+    expect(statusExitCode({ status: 'ready-for-cutover' })).toBe(0);
+    expect(statusExitCode({ status: 'data-imported-images-pending' })).toBe(0);
+    expect(statusExitCode({ status: 'refused' })).toBe(2);
+    expect(statusExitCode({ status: 'unverified' })).toBe(3);
   });
 });
 
