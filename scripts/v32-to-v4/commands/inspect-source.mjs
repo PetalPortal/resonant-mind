@@ -3,7 +3,9 @@ import { compareCatalog, sourceSpecFor } from '../lib/fingerprint.mjs';
 import { MigrationRefusal, isMigrationRefusal } from '../lib/refusal.mjs';
 import { createReport, writeReportAtomic } from '../lib/report.mjs';
 
-const VERSION = '4.0.1';
+import { createRequire } from 'node:module';
+// The release that wrote the artifact (package.json), so a report says which migrator made it.
+const VERSION = createRequire(import.meta.url)('../../../package.json').version;
 const DEFAULT_MIGRATION_ID = 'rmig_inspect_source';
 const ALLOWED_KINDS = new Set(['postgres', 'sqlite', 'd1-export']);
 

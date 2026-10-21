@@ -4,9 +4,11 @@ All notable changes to Resonant Mind. Previously released as "Mind Cloud" (v1.0�
 
 ---
 
-## [Unreleased]
+## [4.1.0] — 2026-10-21
 
-### v3.2 → v4 migrator (operator-assisted, pre-release)
+**The v3.2 → v4 migrator.** v3.2 users can move to v4: an offline, operator-assisted CLI (`npm run migrate:v32 -- --help`) that reads a public v3.2 PostgreSQL or D1/SQLite database without changing it, writes an encrypted bundle, and imports into a fresh, separate v4 PostgreSQL + pgvector database after a reviewed decisions step and a dry run. `validate` then compares the live source and target column by column. It refuses rather than guesses at every step. **Back up your v3.2 database first.** v4 itself is unchanged. Proven: PostgreSQL 16 and 18 (with pgvector), SQLite and D1 exports, the whole flow through the CLI. Not yet proven: PostgreSQL 17, a real connection pooler, very large databases, and a migration of a real user's v3.2 database. Details below and in `docs/migration-v32-v4-acceptance.md`.
+
+### v3.2 → v4 migrator (operator-assisted)
 
 - The CLI now completes the whole operator flow on its own: `draft-decisions`, `apply-decisions`, `plan-relational` are new, `import` writes its receipt (`--receipt-out`), the target commands accept a SQLite or D1-export source (`--source-kind`), and `--help` lists every command with its options (`<command> --help` for one).
 - `validate` reads the live source and the live target itself instead of snapshot files. It compares every mapped column of every source row with the target (timestamps as exact microsecond instants), accounts for each difference by a recorded policy entry, re-proves the target's constraints, foreign keys, CHECK expressions, indexes and sequences, checks the receipts against the plan and the target's own record, and exits with `RMIG-E-VALIDATION` on any finding.

@@ -2,7 +2,9 @@ import { readFileSync } from 'node:fs';
 import { createBundle } from '../lib/bundle.mjs';
 import { MigrationRefusal } from '../lib/refusal.mjs';
 
-const VERSION = '4.0.1';
+import { createRequire } from 'node:module';
+// The release that wrote the artifact (package.json), so a report says which migrator made it.
+const VERSION = createRequire(import.meta.url)('../../../package.json').version;
 
 function refusal(summary) {
   return new MigrationRefusal({ code: 'RMIG-E-SOURCE-ARG', phase: 'export', summary, safe_details: {}, report_path: null });
