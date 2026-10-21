@@ -73,7 +73,7 @@ describe('streaming migration bundles', () => {
     const interrupted = join(root, 'interrupted');
     await expect(createBundle(options(root, { outputPath: interrupted, beforeFinalize() { throw new Error('stop'); } }))).rejects.toThrow('stop');
     expect(readdirSync(root).filter((name) => name.includes('interrupted') || name.includes('.incomplete'))).toEqual([]);
-  });
+  }, 30_000); // scrypt key derivation is slow on shared CI runners
 
   it('scans before finalization and requires explicit lived-content decisions', async () => {
     const root = mkdtempSync(join(tmpdir(), 'rm-bundle-secrets-'));
