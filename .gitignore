@@ -5,3 +5,6 @@ dist/
 *.log
 .DS_Store
 dashboard/
+
+# scratch directories the migration tests create in the repository root
+.tmp-*

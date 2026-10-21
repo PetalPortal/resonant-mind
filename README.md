@@ -18,7 +18,11 @@ This is **v4.0.0 — the Reshape release**.
 - no D1 fallback
 - no hard-coded person or household tenancy
 
-> **Upgrade warning:** The migration runner currently supports fresh v4 databases. It deliberately refuses an existing untracked v3 schema. Back up v3 installations and wait for the reviewed v3.2→v4 expand/backfill/validate/contract migration before upgrading in place.
+> **Upgrading from v3.2? Back up first.** Before you run anything, take a full backup of your v3.2 database (and your images) and check that you can restore it. The [User migration guide](USER_MIGRATION_GUIDE.md) shows how for PostgreSQL and for D1.
+>
+> **v3.2 → v4 migration (operator-assisted).** Since 4.1.0 the `migrate:v32` CLI moves a public v3.2 PostgreSQL or D1/SQLite mind into a **fresh, separate** v4 database. It never changes your v3.2 database, refuses anything it cannot prove instead of guessing, and checks the result column by column before it says you are ready to switch. Some steps stay yours: copying images, re-embedding with your provider, and switching your deployment over. Follow the [User migration guide](USER_MIGRATION_GUIDE.md), or give your agent the [Agent migration runbook](AGENT_MIGRATION_RUNBOOK.md). What has and has not been proven is in [docs/migration-v32-v4-acceptance.md](docs/migration-v32-v4-acceptance.md).
+>
+> The v4 migration runner itself still sets up fresh v4 databases only; it deliberately refuses an existing v3 schema, so a v3 database is never upgraded in place.
 
 ## Architecture
 

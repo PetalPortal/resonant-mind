@@ -1,5 +1,7 @@
 # Migrating to Resonant Mind v4
 
+For the operator-assisted pre-push candidate, read the [complete user migration guide](../USER_MIGRATION_GUIDE.md) and [strict agent migration runbook](../AGENT_MIGRATION_RUNBOOK.md). They are the source of truth for the exact public v3.2 boundaries, evidence gates, current CLI options, refusals, external handoffs, and manual cutover/rollback. They do not promise a release or support commitment.
+
 ## Fresh installations
 
 Create an empty Neon Postgres database with the `vector` extension, set `PG_URL`, and run:
