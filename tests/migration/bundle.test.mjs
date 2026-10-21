@@ -35,7 +35,9 @@ function options(root, overrides = {}) {
   };
 }
 
-describe('streaming migration bundles', () => {
+// Every test here derives keys with the production scrypt cost (N = 2^15), which takes seconds on a
+// shared CI runner; the group gets the time instead of the crypto getting weaker.
+describe('streaming migration bundles', { timeout: 60_000 }, () => {
   it('writes deterministic checksummed NDJSON with counts and restrictive modes', async () => {
     const root = mkdtempSync(join(tmpdir(), 'rm-bundle-'));
     const result = await createBundle(options(root));
@@ -73,7 +75,7 @@ describe('streaming migration bundles', () => {
     const interrupted = join(root, 'interrupted');
     await expect(createBundle(options(root, { outputPath: interrupted, beforeFinalize() { throw new Error('stop'); } }))).rejects.toThrow('stop');
     expect(readdirSync(root).filter((name) => name.includes('interrupted') || name.includes('.incomplete'))).toEqual([]);
-  }, 30_000); // scrypt key derivation is slow on shared CI runners
+  });
 
   it('scans before finalization and requires explicit lived-content decisions', async () => {
     const root = mkdtempSync(join(tmpdir(), 'rm-bundle-secrets-'));
