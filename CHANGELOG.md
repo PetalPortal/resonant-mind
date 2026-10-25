@@ -4,6 +4,14 @@ All notable changes to Resonant Mind. Previously released as "Mind Cloud" (v1.0�
 
 ---
 
+## [Unreleased]
+
+### Docs
+
+- **v3.2 never created its `dreams` table.** v3.2's dream engine writes to a table no v3.2 migration creates, so on a stock install it failed silently and no v3.2 mind has dreams. Anyone who added the table themselves is refused by `inspect-source` (correctly). The user guide now says how to migrate from a copy without it and carry the dream rows into v4 afterwards ("A `dreams` table you added yourself"), and the agent runbook leaves that choice to the owner. Found by a v3.2 user preparing their migration.
+
+---
+
 ## [4.1.0] — 2026-10-21
 
 **The v3.2 → v4 migrator.** v3.2 users can move to v4: an offline, operator-assisted CLI (`npm run migrate:v32 -- --help`) that reads a public v3.2 PostgreSQL or D1/SQLite database without changing it, writes an encrypted bundle, and imports into a fresh, separate v4 PostgreSQL + pgvector database after a reviewed decisions step and a dry run. `validate` then compares the live source and target column by column. It refuses rather than guesses at every step. **Back up your v3.2 database first.** v4 itself is unchanged. Proven: PostgreSQL 16 and 18 (with pgvector), SQLite and D1 exports, the whole flow through the CLI. Not yet proven: PostgreSQL 17, a real connection pooler, very large databases, and a migration of a real user's v3.2 database. Details below and in `docs/migration-v32-v4-acceptance.md`.

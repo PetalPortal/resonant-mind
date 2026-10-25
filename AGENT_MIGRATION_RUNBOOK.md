@@ -98,6 +98,8 @@ Run `inspect-source` with the exact current parser options from the user guide. 
 - ambiguity, image, and old-vector inventories are present;
 - a remote D1 name/URL was not passed to the CLI.
 
+One known case is the owner's call, not yours: a `dreams` table the owner added after v3.2, because v3.2 never created one. Do not remove it yourself; stop with the refusal below and point the owner to "A `dreams` table you added yourself" in the user guide.
+
 Do not classify a private, partial, drifted, pre-`0003`, post-v3.2, or unknown schema as “close enough.” The exact refusal is:
 
 ```text
