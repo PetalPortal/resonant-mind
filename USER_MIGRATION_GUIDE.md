@@ -426,6 +426,19 @@ The exact refusal form is:
 
 With `--json`, preserve `{ code, phase, summary, safe_details, remediation, report_path }`. Never paste secret-bearing details into the report or chat.
 
+### A `dreams` table you added yourself
+
+v3.2's dream engine writes to a `dreams` table that no v3.2 migration creates: `0001`–`0003` and `postgres.sql` have none. On a stock v3.2 install the dream step failed silently every night, so a stock v3.2 mind has no dreams to carry, and the migrator has no mapping for them. If you created the table yourself to make dreams work, `inspect-source` refuses with `RMIG-E-SOURCE-FINGERPRINT`, as it should: the schema is no longer the public v3.2 one.
+
+To migrate anyway, keep the dreams out of the migration and bring them across afterwards:
+
+1. Take your backup as usual, and work only on a copy: the local `wrangler d1 export` file for D1, a restored copy for PostgreSQL. Never change the live v3.2 database.
+2. Save the dream rows from the copy (for example `SELECT * FROM dreams`, to CSV). Then remove the table from the copy: for a D1 export, delete its `CREATE TABLE dreams` statement, any `CREATE INDEX` on it and every `INSERT INTO dreams`; for a restored PostgreSQL copy, `DROP TABLE dreams`. `inspect-source` on that copy now matches the fingerprint.
+3. Run the whole migration from that copy until `status` reports `ready-for-cutover`.
+4. Only then insert the saved rows into v4's `dreams` table (`id`, `dream_date`, `content`, `emotional_seed`, `fragments`, `recurring_dream_id`, `recurrence_count`, `created_at`). Keep their `id`s, so `recurring_dream_id` still points at the right row; set `vectorized_at` to NULL, so the nightly sweep embeds a few each night; and set `composed_by = 'template'`, which is how v4 labels dreams from before composed dreams. Then move the id sequence past them: `SELECT setval(pg_get_serial_sequence('dreams', 'id'), (SELECT max(id) FROM dreams));`
+
+`validate` does not compare `dreams`, because v3.2 has no such table to compare with, so rows added in step 4 do not change its result. Adding them after `ready-for-cutover` keeps the proof about everything else clean.
+
 ## Interruption and restart
 
 There is no general end-to-end resume contract for an operator run. The CLI exposes bounded checkpoint plumbing for internal artifact binding, but that is not permission to resume an arbitrary interrupted migration or reuse a partially written target. If an import, target preparation, image handoff, provider phase, or validation is interrupted or its evidence is ambiguous:
