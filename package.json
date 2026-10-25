@@ -30,11 +30,12 @@
     "@cloudflare/workers-types": "5.20261019.1",
     "@types/pg": "8.20.0",
     "typescript": "5.9.3",
-    "vitest": "4.1.11",
+    "vitest": "4.1.12",
     "wrangler": "4.151.3"
   },
   "overrides": {
     "protobufjs": "7.6.5",
-    "@protobufjs/utf8": "1.1.2"
+    "@protobufjs/utf8": "1.1.2",
+    "undici": "7.30.1"
   }
 }
