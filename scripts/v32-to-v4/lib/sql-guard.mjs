@@ -184,6 +184,15 @@ function validateDrop(tokens) {
   assertUnqualifiedIdentifier(tokens, index, 'DROP target');
 }
 
+// `wrangler d1 export` resets the AUTOINCREMENT counters before re-inserting them:
+// `DELETE FROM sqlite_sequence;` followed by INSERTs into sqlite_sequence. That one statement is
+// accepted; any other DELETE is refused, because an export holds schema and data, not edits.
+function validateDelete(tokens) {
+  if (word(tokens[1]) !== 'from' || word(tokens[2]) !== 'sqlite_sequence' || tokens.length !== 3) {
+    throw unsafe('The D1 SQL export contains a DELETE other than the sqlite_sequence reset.', { statement: 'delete' });
+  }
+}
+
 function validateInsert(tokens) {
   const first = word(tokens[0]);
   let index = 1;
@@ -206,6 +215,7 @@ export function validateD1Sql(sql) {
     else if (first === 'alter') validateAlter(statement.tokens);
     else if (first === 'drop') validateDrop(statement.tokens);
     else if (first === 'insert' || first === 'replace') validateInsert(statement.tokens);
+    else if (first === 'delete') validateDelete(statement.tokens);
     else throw unsafe('The D1 SQL export contains an unsupported SQL statement.', { statement: first });
   }
   return statements;

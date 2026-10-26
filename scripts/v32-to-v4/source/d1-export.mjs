@@ -32,8 +32,19 @@ export function createD1ExportAdapter({ source } = {}) {
   const tempDirectory = mkdtempSync(join(tmpdir(), 'rm-d1-materialized-'));
   const materializedPath = join(tempDirectory, 'materialized.sqlite');
   try {
-    const database = new DatabaseSync(materializedPath);
-    try { for (const statement of statements) database.exec(statement.text); } finally { database.close(); }
+    // An export writes rows in id order, so a row may reference a row that comes later in the file
+    // (observations.superseded_by, for one), and a dump's PRAGMA defer_foreign_keys lasts only for one
+    // transaction. So the export is loaded without enforcement, and every foreign key is then proved over
+    // the whole materialized database, which is the check enforcement would have made.
+    const database = new DatabaseSync(materializedPath, { enableForeignKeyConstraints: false });
+    try {
+      for (const statement of statements) database.exec(statement.text);
+      const violations = database.prepare('PRAGMA foreign_key_check').all();
+      if (violations.length > 0) {
+        const tables = [...new Set(violations.map((row) => row.table))].sort();
+        throw refusal('RMIG-E-SOURCE-FINGERPRINT', 'The local D1 SQL export violates its own foreign keys.', { source_kind: 'd1-export', foreign_key_violations: violations.length, tables });
+      }
+    } finally { database.close(); }
     return assertSourceAdapter(new SqliteV32Adapter({ source: materializedPath, allowAnyTables: true, tempDirectory, cleanupTemp: true }));
   } catch (error) {
     try { rmSync(tempDirectory, { recursive: true, force: true }); } catch { /* preserve the original refusal */ }

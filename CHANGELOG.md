@@ -6,6 +6,10 @@ All notable changes to Resonant Mind. Previously released as "Mind Cloud" (v1.0â
 
 ## [Unreleased]
 
+### Fixed
+
+- **A real `wrangler d1 export` can now be read.** The D1 export adapter refused what wrangler writes: the `DELETE FROM sqlite_sequence;` that precedes the AUTOINCREMENT counters (`RMIG-E-D1-SQL-UNSAFE`), and, with that line removed, any row that references a row later in the file (`observations.superseded_by` points forward in id order), because the statements were replayed one by one with foreign keys enforced and no transaction, so the dump's `PRAGMA defer_foreign_keys` did nothing (`RMIG-E-SOURCE-FINGERPRINT`, `ERR_SQLITE_ERROR`). The guard now accepts exactly that one DELETE and no other, and the export is loaded without enforcement and then every foreign key is proved with `PRAGMA foreign_key_check` over the whole materialized database; a violation is refused with the number of rows and the tables. Found by a v3.2 user migrating a real D1 mind.
+
 ### Docs
 
 - **v3.2 never created its `dreams` table.** v3.2's dream engine writes to a table no v3.2 migration creates, so on a stock install it failed silently and no v3.2 mind has dreams. Anyone who added the table themselves is refused by `inspect-source` (correctly). The user guide now says how to migrate from a copy without it and carry the dream rows into v4 afterwards ("A `dreams` table you added yourself"), and the agent runbook leaves that choice to the owner. Found by a v3.2 user preparing their migration.
