@@ -64,7 +64,9 @@ export function normalizeDate(value, { choice, table, field } = {}) {
   return normalizeDate(selected.value, { table, field });
 }
 export function normalizeJson(value, expectedShape, { choice } = {}) {
-  if (missing(value)) return value ?? null;
+  // Only NULL is missing here. Empty text is not JSON: the policy generator lists it as malformed and the validator
+  // holds the target to the reviewed choice, so the transform must apply that choice rather than keep the text.
+  if (value === null || value === undefined) return null;
   let parsed = value;
   if (typeof value === 'string') { try { parsed = JSON.parse(value); } catch { parsed = undefined; } if (parsed !== undefined && !jsonSurvivesParsing(value)) parsed = undefined; }
   const valid = expectedShape === 'array' ? Array.isArray(parsed) : expectedShape === 'integer-array' ? Array.isArray(parsed) && parsed.every((item) => Number.isSafeInteger(typeof item === 'number' ? item : Number(item))) : expectedShape === 'object' ? parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) : Array.isArray(parsed) || (parsed !== null && typeof parsed === 'object');

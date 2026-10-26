@@ -59,6 +59,10 @@ describe('a JSON number JavaScript cannot carry is a decision, not a silent chan
     expect(() => normalizeJson('[12345678901234567891]', 'array')).toThrow(/reviewed/u);
     expect(normalizeJson('[1, 2]', 'array')).toEqual([1, 2]);
     expect(normalizeJson('[12345678901234567891]', 'array', { choice: { action: 'map-json', value: ['12345678901234567891'] } })).toEqual(['12345678901234567891']);
+    // empty text is malformed JSON (the generator lists it, the validator holds the target to the choice), not a missing value
+    expect(() => normalizeJson('', 'array')).toThrow(/reviewed/u);
+    expect(normalizeJson('', 'array', { choice: { action: 'map-json', value: [] } })).toEqual([]);
+    expect(normalizeJson(null, 'array')).toBeNull();
   });
 
   it('compiles once a person has chosen how the value is to be stored', () => {

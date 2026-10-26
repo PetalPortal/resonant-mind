@@ -9,6 +9,7 @@ All notable changes to Resonant Mind. Previously released as "Mind Cloud" (v1.0â
 ### Fixed
 
 - **A real `wrangler d1 export` can now be read.** The D1 export adapter refused what wrangler writes: the `DELETE FROM sqlite_sequence;` that precedes the AUTOINCREMENT counters (`RMIG-E-D1-SQL-UNSAFE`), and, with that line removed, any row that references a row later in the file (`observations.superseded_by` points forward in id order), because the statements were replayed one by one with foreign keys enforced and no transaction, so the dump's `PRAGMA defer_foreign_keys` did nothing (`RMIG-E-SOURCE-FINGERPRINT`, `ERR_SQLITE_ERROR`). The guard now accepts exactly that one DELETE and no other, and the export is loaded without enforcement and then every foreign key is proved with `PRAGMA foreign_key_check` over the whole materialized database; a violation is refused with the number of rows and the tables. Found by a v3.2 user migrating a real D1 mind.
+- **Empty text in a JSON column now takes the reviewed choice.** `draft-decisions` lists an empty string in a JSON column (`identity.connections` in a v3.2 mind) as `malformed-json`, and `validate` holds the target to the reviewed `map-json` value; but the transform treated empty text as a missing value and kept it, so the import wrote the empty string and `validate` then refused with `cell-mismatch` (`difference: json`) on a choice the owner had made. `normalizeJson` now treats only NULL as missing. Found on the same migration.
 
 ### Docs
 
