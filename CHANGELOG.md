@@ -4,7 +4,9 @@ All notable changes to Resonant Mind. Previously released as "Mind Cloud" (v1.0â
 
 ---
 
-## [Unreleased]
+## [4.1.1] â€” 2026-10-27
+
+**Fixes from the first real v3.2 migration.** Anna (@anna092024) took a real D1 mind through 4.1.0 and found that a stock `wrangler d1 export` was refused. Her fixes (#12) and the follow-ups they led to (#13) are below. v4 itself is unchanged.
 
 ### Fixed
 
