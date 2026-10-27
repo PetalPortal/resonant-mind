@@ -146,12 +146,51 @@ describe('local D1 SQL export adapter', () => {
     expect(rows).toEqual(bothRows);
   });
 
-  it('still refuses a dangling reference under foreign_keys=ON and a deferral: at the COMMIT, or at the check over the whole database when there is none', async () => {
+  it('still refuses a dangling reference under foreign_keys=ON and a deferral, at the COMMIT', async () => {
     const pragmas = 'PRAGMA foreign_keys=ON; BEGIN TRANSACTION; PRAGMA defer_foreign_keys=TRUE; ';
     sqliteRefused((await outcome(pragmas + SELF_REF + DANGLING + 'COMMIT;')).error);
-    const open = (await outcome(pragmas + SELF_REF + DANGLING)).error;
-    expect(open?.code).toBe('RMIG-E-SOURCE-FINGERPRINT');
-    expect(open?.safe_details).toMatchObject({ foreign_key_violations: 1, tables: ['entities'] });
+  });
+
+  // SQLite rolls an open transaction back when the connection closes, so a dump that is cut off inside BEGIN (or never commits) would
+  // be read as a smaller database with no error. The guard follows the transaction across the stream and refuses what does not balance.
+  const txRefused = (error, reason) => {
+    expect(error?.code).toBe('RMIG-E-D1-SQL-UNSAFE');
+    expect(error?.safe_details).toEqual({ reason });
+  };
+
+  it('accepts a balanced BEGIN ... COMMIT, one after another, and a dump with no transaction statements at all', async () => {
+    const two = await outcome(ENTITY + "BEGIN TRANSACTION; INSERT INTO entities (name) VALUES ('b'); COMMIT; BEGIN; INSERT INTO entities (name) VALUES ('c'); END TRANSACTION;");
+    expect(two.error).toBeUndefined();
+    expect(two.rows.map((row) => row.name)).toEqual(['a', 'b', 'c']);
+    const none = await outcome(ENTITY);
+    expect(none.error).toBeUndefined();
+    expect(none.rows).toEqual([{ id: 1, name: 'a' }]);
+  });
+
+  it.each([
+    ['BEGIN with no COMMIT', "BEGIN TRANSACTION; INSERT INTO entities (name) VALUES ('b');"],
+    ['BEGIN as the last statement', 'BEGIN;'],
+    ['a second transaction that never commits', "BEGIN; INSERT INTO entities (name) VALUES ('b'); COMMIT; BEGIN; INSERT INTO entities (name) VALUES ('c');"],
+  ])('refuses a dump that ends inside a transaction (%s), instead of reading the rows SQLite would roll back', async (_label, statements) => {
+    txRefused((await outcome(ENTITY + statements)).error, 'unterminated-transaction');
+  });
+
+  it('refuses a dangling reference in a dump that never commits as an unterminated transaction, not by the foreign key check', async () => {
+    txRefused((await outcome('PRAGMA foreign_keys=ON; BEGIN TRANSACTION; PRAGMA defer_foreign_keys=TRUE; ' + SELF_REF + DANGLING)).error, 'unterminated-transaction');
+  });
+
+  it('refuses a BEGIN while a transaction is already open', async () => {
+    txRefused((await outcome(ENTITY + 'BEGIN; BEGIN TRANSACTION; COMMIT;')).error, 'nested-transaction');
+  });
+
+  it.each(['COMMIT;', 'COMMIT TRANSACTION;', 'END;', 'END TRANSACTION;'])('refuses %s when no transaction is open', async (statement) => {
+    txRefused((await outcome(ENTITY + statement)).error, 'commit-without-begin');
+    txRefused((await outcome(ENTITY + 'BEGIN; COMMIT; ' + statement)).error, 'commit-without-begin');
+  });
+
+  it.each(['ROLLBACK;', 'ROLLBACK TRANSACTION;'])('refuses %s, inside a transaction or outside one, because an export holds data and a rollback discards part of it', async (statement) => {
+    txRefused((await outcome(ENTITY + "BEGIN; INSERT INTO entities (name) VALUES ('b'); " + statement + ' COMMIT;')).error, 'rollback');
+    txRefused((await outcome(ENTITY + statement)).error, 'rollback');
   });
 
   it.each(['.dump', '.read other.sql', '.shell echo unsafe'])('rejects shell directive %s and leaves no materialization', (directive) => {

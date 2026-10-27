@@ -205,12 +205,25 @@ function validateInsert(tokens) {
 
 export function validateD1Sql(sql) {
   const statements = tokenizeSql(sql);
+  // The export is replayed into SQLite and the connection is then closed, so a transaction that is still open
+  // rolls back and its rows silently disappear. Track the transaction across the stream and refuse anything that does not balance.
+  let transactionOpen = false;
   for (const statement of statements) {
     rejectBanned(statement.tokens);
     const first = word(statement.tokens[0]);
     if (!first) continue;
-    if (['begin', 'commit', 'end', 'rollback'].includes(first)) validateTransaction(statement.tokens);
-    else if (first === 'pragma') validatePragma(statement.tokens);
+    if (['begin', 'commit', 'end', 'rollback'].includes(first)) {
+      validateTransaction(statement.tokens);
+      if (first === 'begin') {
+        if (transactionOpen) throw unsafe('The D1 SQL export begins a transaction inside another transaction.', { reason: 'nested-transaction' });
+        transactionOpen = true;
+      } else if (first === 'rollback') {
+        throw unsafe('The D1 SQL export contains a ROLLBACK, which would discard part of the data it holds.', { reason: 'rollback' });
+      } else {
+        if (!transactionOpen) throw unsafe('The D1 SQL export commits a transaction that was never begun.', { reason: 'commit-without-begin' });
+        transactionOpen = false;
+      }
+    } else if (first === 'pragma') validatePragma(statement.tokens);
     else if (first === 'create') validateCreate(statement.tokens);
     else if (first === 'alter') validateAlter(statement.tokens);
     else if (first === 'drop') validateDrop(statement.tokens);
@@ -218,5 +231,6 @@ export function validateD1Sql(sql) {
     else if (first === 'delete') validateDelete(statement.tokens);
     else throw unsafe('The D1 SQL export contains an unsupported SQL statement.', { statement: first });
   }
+  if (transactionOpen) throw unsafe('The D1 SQL export ends inside a transaction that is never committed, so SQLite would roll its rows back.', { reason: 'unterminated-transaction' });
   return statements;
 }
