@@ -439,6 +439,24 @@ To migrate anyway, keep the dreams out of the migration and bring them across af
 
 `validate` does not compare `dreams`, because v3.2 has no such table to compare with, so rows added in step 4 do not change its result. Adding them after `ready-for-cutover` keeps the proof about everything else clean.
 
+### Image rows with the path `pending`
+
+A v3.2 image row keeps where its file is in `images.path`. On a v3.2 deployment that never had R2 enabled the path is the literal `pending`, and no file exists for the row anywhere: it holds the description, the links and the other metadata, and nothing to copy. To count them, run this against the v3.2 database (for D1, `npx wrangler d1 execute <binding-or-name> --remote --command "<the query>"`):
+
+```sql
+SELECT count(*) AS pending, (SELECT count(*) FROM images) AS total FROM images WHERE path = 'pending';
+```
+
+If `pending` is 0, this section does not apply. If it is not, the migrator reads each such row as an image to copy from a file called `pending`. `plan-images` lists one object for it, and `copy-images` refuses with `RMIG-E-IMAGE-INCOMPLETE`, reason `missing` for each of those objects, and writes no receipt. One such row refuses the whole copy, so a mind that has some real images too gets no receipt for those either. Nothing is written to the target directory.
+
+The migration stays at `data-imported-images-pending`. That state is accurate, and the import itself did not fail:
+
+- The relational data, these rows included, is imported and checked column by column like any other; `validate` does not look at an image's file for that.
+- The tool cannot report the images as complete, so it never reports `ready-for-cutover` or `complete-operator-attested` for this mind. The re-embedding plan has a job for each of these rows too, and a receipt for an image job must name the object that was copied, so those jobs cannot be receipted either.
+- Nothing is lost. There was no file in v3.2 to lose. In v4 such a row is a description with its links and no picture: v4 serves an image only from a path that starts `r2://images/`, and a `pending` path answers 404.
+
+The migrator has no option that excludes these rows or marks them as having no file: no decision, policy or `plan-images`/`copy-images` option does either, and a signed receipt would have to state the SHA-256, size and MIME type observed for an object that does not exist. Do not place a file called `pending` in the source directory to satisfy the copy; it would make the receipt say a picture was copied when none was. The state stays as it is. Whether to cut over from it is your decision, which the migrator does not make for you; if you do, record the `pending` count from the query above with the evidence listed in "Cutover and rollback".
+
 ## Interruption and restart
 
 There is no general end-to-end resume contract for an operator run. The CLI exposes bounded checkpoint plumbing for internal artifact binding, but that is not permission to resume an arbitrary interrupted migration or reuse a partially written target. If an import, target preparation, image handoff, provider phase, or validation is interrupted or its evidence is ambiguous:

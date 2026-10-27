@@ -15,6 +15,7 @@ All notable changes to Resonant Mind. Previously released as "Mind Cloud" (v1.0â
 
 ### Docs
 
+- **v3.2 image rows with the path `pending` cannot be copied.** A v3.2 mind that never enabled R2 has image rows whose `path` is `pending` and that have no file anywhere. The planner lists them as objects to copy, so `copy-images` refuses with `RMIG-E-IMAGE-INCOMPLETE` (reason `missing`, and no receipt for the real images either), and the migration ends at `data-imported-images-pending`, never `ready-for-cutover`. The user guide now says how to count these rows, what that state does and does not mean for the migrated mind, and that the migrator has no option to exclude them ("Image rows with the path `pending`"). The behaviour is unchanged.
 - **v3.2 never created its `dreams` table.** v3.2's dream engine writes to a table no v3.2 migration creates, so on a stock install it failed silently and no v3.2 mind has dreams. Anyone who added the table themselves is refused by `inspect-source` (correctly). The user guide now says how to migrate from a copy without it and carry the dream rows into v4 afterwards ("A `dreams` table you added yourself"), and the agent runbook leaves that choice to the owner. Found by a v3.2 user preparing their migration.
 
 ---
