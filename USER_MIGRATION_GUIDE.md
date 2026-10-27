@@ -447,7 +447,7 @@ A v3.2 image row keeps where its file is in `images.path`. On a v3.2 deployment 
 SELECT count(*) AS pending, (SELECT count(*) FROM images) AS total FROM images WHERE path = 'pending';
 ```
 
-If `pending` is 0, this section does not apply. If it is not, the migrator reads each such row as an image to copy from a file called `pending`. `plan-images` lists one object for it, and `copy-images` refuses with `RMIG-E-IMAGE-INCOMPLETE`, reason `missing` for each of those objects, and writes no receipt. One such row refuses the whole copy, so a mind that has some real images too gets no receipt for those either. Nothing is written to the target directory.
+If `pending` is 0, this section does not apply. If it is not, the migrator reads each such row as an image to copy from a file called `pending`. `plan-images` lists one object for it, and the filesystem copy (`copy-images --adapter filesystem`) refuses with `RMIG-E-IMAGE-INCOMPLETE`, reason `missing` for each of those objects, and writes no receipt. One such row refuses the whole copy, so a mind that has some real images too gets no receipt for those either. Nothing is written to the target directory.
 
 The migration stays at `data-imported-images-pending`. That state is accurate, and the import itself did not fail:
 
@@ -455,7 +455,7 @@ The migration stays at `data-imported-images-pending`. That state is accurate, a
 - The tool cannot report the images as complete, so it never reports `ready-for-cutover` or `complete-operator-attested` for this mind. The re-embedding plan has a job for each of these rows too, and a receipt for an image job must name the object that was copied, so those jobs cannot be receipted either.
 - Nothing is lost. There was no file in v3.2 to lose. In v4 such a row is a description with its links and no picture: v4 serves an image only from a path that starts `r2://images/`, and a `pending` path answers 404.
 
-The migrator has no option that excludes these rows or marks them as having no file: no decision, policy or `plan-images`/`copy-images` option does either, and a signed receipt would have to state the SHA-256, size and MIME type observed for an object that does not exist. Do not place a file called `pending` in the source directory to satisfy the copy; it would make the receipt say a picture was copied when none was. The state stays as it is. Whether to cut over from it is your decision, which the migrator does not make for you; if you do, record the `pending` count from the query above with the evidence listed in "Cutover and rollback".
+The migrator has nothing made for these rows: no decision, policy item or `plan-images`/`copy-images` option excludes them or marks them as having no file, and a signed receipt would have to state the SHA-256, size and MIME type observed for an object that does not exist. Do not place a file called `pending` in the source directory to satisfy the copy; it would make the receipt say a picture was copied when none was. The state stays as it is. Whether to cut over from it is your decision, which the migrator does not make for you; if you do, record the `pending` count from the query above with the evidence listed in "Cutover and rollback".
 
 ## Interruption and restart
 
