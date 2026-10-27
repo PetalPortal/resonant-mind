@@ -18,8 +18,8 @@ import { canonicalSha256 } from '../lib/hash.mjs';
 import { parseInstantMicros } from '../lib/instant.mjs';
 import { jsonSurvivesParsing, sameJsonLossless } from '../lib/lossless-json.mjs';
 import { sourceKey } from '../transform/id-map.mjs';
-import { KIND_NORMALIZATIONS, SQLITE_UTC, DATE_FIELDS, TIMESTAMP_FIELDS, decisionItemForCell } from '../policy/generate.mjs';
-import { ALIASES, CONTEXTS, ENUMS, ENUM_FIELDS } from '../transform/value-map.mjs';
+import { KIND_NORMALIZATIONS, SQLITE_UTC, DATE_FIELDS, TIMESTAMP_FIELDS, contextVocabulary, decisionItemForCell } from '../policy/generate.mjs';
+import { ALIASES, ENUMS, ENUM_FIELDS } from '../transform/value-map.mjs';
 import { TARGET_SCHEMAS } from '../transform/target-schema.mjs';
 
 const MAP = JSON.parse(readFileSync(new URL('../spec/v3.2-to-v4-map.json', import.meta.url), 'utf8'));
@@ -86,7 +86,7 @@ function expectedEnum(column, value, { decisions, table, rowHash, recorded }) {
 function expectedContext(value, { decisions, table, rowHash, column, recorded }) {
   const text = lower(value);
   const sanctioned = (candidate) => (candidate.how === null || recorded === candidate.value ? candidate : null);
-  if (CONTEXTS.has(text)) return sanctioned({ value: text, how: text === value ? null : 'context-case-folded' });
+  if (contextVocabulary(table, column).has(text)) return sanctioned({ value: text, how: text === value ? null : 'context-case-folded' });
   const choice = reviewedChoice(decisions, table, rowHash, 'unknown-value', column);
   const mapped = choice?.value ?? choice?.mapped_value ?? choice?.target;
   if (choiceAction(choice) === 'map-context' && typeof mapped === 'string') return sanctioned({ value: lower(mapped), how: 'context-reviewed-map' });

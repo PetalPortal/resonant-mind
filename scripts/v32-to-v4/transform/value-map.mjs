@@ -1,6 +1,6 @@
 import { canonicalJson } from '../lib/canonical-json.mjs';
 import { canonicalSha256 } from '../lib/hash.mjs';
-import { KIND_NORMALIZATIONS, ISO_WITH_OFFSET, SQLITE_UTC, TIMESTAMP_FIELDS, DATE_FIELDS, decisionItemForCell } from '../policy/generate.mjs';
+import { KIND_NORMALIZATIONS, ISO_WITH_OFFSET, SQLITE_UTC, TIMESTAMP_FIELDS, DATE_FIELDS, KNOWN_CONTEXTS as CONTEXTS, contextVocabulary, decisionItemForCell } from '../policy/generate.mjs';
 import { choiceAction } from './id-map.mjs';
 import { jsonSurvivesParsing } from '../lib/lossless-json.mjs';
 import { parseInstantMicros } from '../lib/instant.mjs';
@@ -21,7 +21,6 @@ const ALIASES = {
   status: { pending:'active', open:'active', closed:'resolved' }, intensity: { high:'strong' },
   thread_type: { 'urgent-task':'task', build:'task', maintenance:'task', pickup:'task', deadline:'task', morning_handoff:'handoff', 'morning-handoff':'handoff', question:'explore', research:'explore', project_seed:'idea', work:'project', infrastructure:'project', anniversary:'relational', personal:'relational' },
 };
-const CONTEXTS = new Set(['default', 'primary', 'private', 'public', 'personal', 'relationship', 'work', 'inner', 'dream', 'archive', 'archived', 'system', 'global', 'emotional-processing', 'interests-curiosities', 'creative-space', 'relational-models', 'episodic', 'values-ethics', 'research']);
 const ENUM_FIELDS = new Set(['observations.salience', 'observations.weight', 'observations.certainty', 'observations.charge', 'observations.source', 'threads.thread_type', 'threads.status', 'threads.priority', 'relational_state.intensity']);
 function action(choice) { return choiceAction(choice); }
 // Enums, contexts and entity kinds treat only NULL as missing: the generator lists '' as a decision item (it is not in the
@@ -101,12 +100,13 @@ export function normalizeEntityKind(value, { choice } = {}) {
   if (selectedAction === 'map-to-node' && ['concept', 'project', 'infrastructure', 'artifact', 'moment', 'session_log', 'practice', 'research', 'journal', 'community', 'emotional_pattern', 'relationship', 'self', 'place', 'object'].includes(String(mapped).toLowerCase())) return String(mapped).toLowerCase();
   throw new Error('Unknown entity kind requires a reviewed final kind allowed by v4 checks.');
 }
-export function normalizeContext(value, { choice } = {}) {
+export function normalizeContext(value, { choice, table, field } = {}) {
   if (absent(value)) return null;
-  const normalized = String(value).toLowerCase(); if (CONTEXTS.has(normalized)) return normalized;
+  const known = contextVocabulary(table, field); // observations.context has a v4 CHECK of eight values; the other columns are free text
+  const normalized = String(value).toLowerCase(); if (known.has(normalized)) return normalized;
   const selected = choice?.choice ?? choice; if (action(selected) !== 'map-context') throw new Error('Unknown context requires a reviewed mapping.');
   const mapped = selected.value ?? selected.mapped_value ?? selected.target;
-  if (typeof mapped !== 'string' || !CONTEXTS.has(mapped.toLowerCase())) throw new Error('Reviewed context mapping is unsupported.');
+  if (typeof mapped !== 'string' || !known.has(mapped.toLowerCase())) throw new Error('Reviewed context mapping is unsupported.');
   return mapped.toLowerCase();
 }
 export function buildValueMaps({ tables = {}, policy, skipRows = new Set() } = {}) {
@@ -117,7 +117,7 @@ export function buildValueMaps({ tables = {}, policy, skipRows = new Set() } = {
       if (DATE_FIELDS.has(`${table}.${field}`) && value !== null && value !== undefined) { const item = policyChoice(policy, row, table, 'date', field); try { output.dates[`${table}:${rowHash}:${field}`] = normalizeDate(value, { choice: item, table, field }); } catch (error) { losses.push({ kind: 'unresolved-date', source_table: table, source_row_sha256: rowHash, field, reason: error.message }); } }
       if (TIMESTAMP_FIELDS.has(`${table}.${field}`) && value !== null && value !== undefined) { const item = policyChoice(policy, row, table, 'timestamp', field); try { output.timestamps[`${table}:${rowHash}:${field}`] = normalizeTimestamp(value, { choice: item, table, field }); } catch (error) { losses.push({ kind: 'unresolved-timestamp', source_table: table, source_row_sha256: rowHash, field, reason: error.message }); } }
       if (ENUM_FIELDS.has(`${table}.${field}`) && value !== null && value !== undefined) { const item = policyChoice(policy, row, table, 'unknown-value', field); try { output.enums[`${table}:${rowHash}:${field}`] = normalizeEnum(value, field, { choice: item }); } catch (error) { losses.push({ kind: 'unresolved-enum', source_table: table, source_row_sha256: rowHash, field, reason: error.message }); } }
-      if (['context', 'scope', 'primary_context'].includes(field) && value !== null && value !== undefined) { const item = policyChoice(policy, row, table, 'unknown-value', field); try { output.contexts[`${table}:${rowHash}:${field}`] = normalizeContext(value, { choice: item }); } catch (error) { losses.push({ kind: 'unresolved-context', source_table: table, source_row_sha256: rowHash, field, reason: error.message }); } }
+      if (['context', 'scope', 'primary_context'].includes(field) && value !== null && value !== undefined) { const item = policyChoice(policy, row, table, 'unknown-value', field); try { output.contexts[`${table}:${rowHash}:${field}`] = normalizeContext(value, { choice: item, table, field }); } catch (error) { losses.push({ kind: 'unresolved-context', source_table: table, source_row_sha256: rowHash, field, reason: error.message }); } }
       if (['links', 'connections', 'tags', 'source_observation_ids', 'data', 'sit_notes'].includes(field) && value !== null && value !== undefined) { const item = policyChoice(policy, row, table, 'malformed-json', field); try { output.json[`${table}:${rowHash}:${field}`] = normalizeJson(value, field === 'data' ? 'object' : field === 'sit_notes' ? 'array-or-object' : field === 'source_observation_ids' ? 'integer-array' : 'array', { choice: item }); } catch (error) { losses.push({ kind: 'unresolved-json', source_table: table, source_row_sha256: rowHash, field, reason: error.message }); } }
     }
     if (table === 'entities') { const value = row.entity_type ?? row.kind; if (value !== null && value !== undefined) { const item = policyChoice(policy, row, table, 'entity-kind', 'entity_type'); try { output.entity_kinds[`${table}:${rowHash}`] = normalizeEntityKind(value, { choice: item }); } catch (error) { losses.push({ kind: 'unresolved-entity-kind', source_table: table, source_row_sha256: rowHash, reason: error.message }); } } }

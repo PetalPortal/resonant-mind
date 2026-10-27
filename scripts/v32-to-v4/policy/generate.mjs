@@ -6,6 +6,7 @@ import { MigrationRefusal } from '../lib/refusal.mjs';
 import { verifyBundle, readBundleMember } from '../lib/bundle.mjs';
 import { jsonSurvivesParsing } from '../lib/lossless-json.mjs';
 import { parseInstantMicros } from '../lib/instant.mjs';
+import { OBS_CONTEXTS } from '../transform/target-schema.mjs';
 
 const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3,})?(?:Z|[+-]\d{2}:\d{2})$/u;
 const SQLITE_UTC = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/u;
@@ -22,7 +23,11 @@ const KIND_NORMALIZATIONS = new Map([
 ]);
 const PERSON_KINDS = new Set(['self', 'person', 'peer_ai']);
 const NODE_KINDS = new Set(['concept', 'project', 'infrastructure', 'artifact', 'moment', 'session_log', 'practice', 'research', 'journal', 'community', 'emotional_pattern', 'relationship', 'self', 'place', 'object']);
-const KNOWN_CONTEXTS = new Set(['default', 'primary', 'private', 'public', 'personal', 'relationship', 'work', 'inner', 'dream', 'archive', 'archived', 'system', 'global', 'emotional-processing', 'interests-curiosities', 'creative-space', 'relational-models', 'episodic', 'values-ethics', 'research']);
+export const KNOWN_CONTEXTS = new Set(['default', 'primary', 'private', 'public', 'personal', 'relationship', 'work', 'inner', 'dream', 'archive', 'archived', 'system', 'global', 'emotional-processing', 'interests-curiosities', 'creative-space', 'relational-models', 'episodic', 'values-ethics', 'research']);
+// observations.context is the one context column with a v4 CHECK (eight values, migrations/postgres/0009); every other context
+// column (primary_context, scope, relations, threads, tensions, images, notes) is plain TEXT. "Known" and "allowed as a mapping
+// target" are the same set for a column, so the generator, the value map, validate and the review all ask this one function.
+export function contextVocabulary(table, field) { return table === 'observations' && field === 'context' ? OBS_CONTEXTS : KNOWN_CONTEXTS; }
 const KNOWN_STATUSES = new Set(['pending', 'open', 'active', 'resolved', 'closed', 'accepted', 'rejected', 'dismissed', 'deferred', 'cancelled', 'canceled']);
 const TARGET_ENUM_ALIASES = new Map([
   ['observations.weight', new Set(['light', 'medium', 'heavy', 'low', 'high'])],
@@ -182,7 +187,7 @@ export function generateDecisionItems(bundle) {
       }
       const shape = JSON_SHAPES.get(field);
       if (shape && value !== null && value !== undefined && !shapeOk(value, shape)) add(items, seen, makeItem('malformed-json', table, row, index, `JSON field does not match the expected ${shape} shape, or holds a number that JavaScript cannot carry exactly, or repeats an object key`, ['map-json', 'exclude-row'], { field, expected_shape: shape, observed_value_sha256: sha256Hex(String(value)) }));
-      if ((field === 'context' || field === 'scope' || field === 'primary_context') && value !== null && value !== undefined && !KNOWN_CONTEXTS.has(String(value).toLowerCase())) add(items, seen, itemForUnknown(table, row, index, field, value, 'context/scope value is not a known deterministic value', ['map-context', 'exclude-row']));
+      if ((field === 'context' || field === 'scope' || field === 'primary_context') && value !== null && value !== undefined && !contextVocabulary(table, field).has(String(value).toLowerCase())) add(items, seen, itemForUnknown(table, row, index, field, value, 'context/scope value is not a known deterministic value', ['map-context', 'exclude-row']));
       if (['status', 'salience', 'certainty', 'weight', 'charge', 'source', 'thread_type', 'priority', 'intensity'].includes(field) && value !== null && value !== undefined) {
         const allowed = TARGET_ENUM_ALIASES.get(`${table}.${field}`);
         const normalized = String(value).toLowerCase();
