@@ -24,7 +24,11 @@ const ALIASES = {
 const CONTEXTS = new Set(['default', 'primary', 'private', 'public', 'personal', 'relationship', 'work', 'inner', 'dream', 'archive', 'archived', 'system', 'global', 'emotional-processing', 'interests-curiosities', 'creative-space', 'relational-models', 'episodic', 'values-ethics', 'research']);
 const ENUM_FIELDS = new Set(['observations.salience', 'observations.weight', 'observations.certainty', 'observations.charge', 'observations.source', 'threads.thread_type', 'threads.status', 'threads.priority', 'relational_state.intensity']);
 function action(choice) { return choiceAction(choice); }
+// Enums, contexts and entity kinds treat only NULL as missing: the generator lists '' as a decision item (it is not in the
+// vocabulary) and validate holds the target to the reviewed choice, so the transform must apply it. Timestamps and dates keep
+// missing(): the generator raises no item for '', so there is no choice to apply.
 function missing(value) { return value === null || value === undefined || value === ''; }
+function absent(value) { return value === null || value === undefined; }
 function policyChoice(policy, row, table, type, field) { return decisionItemForCell(policy, { table, rowHash: canonicalSha256(row), type, field }); }
 // A JavaScript Date counts milliseconds, PostgreSQL timestamptz counts microseconds, and the v4
 // columns are timestamptz. toISOString() alone would drop the last three digits of a v3.2 value such
@@ -78,7 +82,7 @@ export function normalizeJson(value, expectedShape, { choice } = {}) {
   return mapped;
 }
 export function normalizeEnum(value, field, { choice } = {}) {
-  if (missing(value)) return value ?? null;
+  if (absent(value)) return null;
   const normalized = String(value).toLowerCase();
   if (ENUMS[field]?.has(normalized)) return normalized;
   if (ALIASES[field]?.[normalized] !== undefined) return ALIASES[field][normalized];
@@ -89,7 +93,7 @@ export function normalizeEnum(value, field, { choice } = {}) {
   return mapped;
 }
 export function normalizeEntityKind(value, { choice } = {}) {
-  if (missing(value)) return value ?? null;
+  if (absent(value)) return null;
   const normalized = KIND_NORMALIZATIONS.get(String(value).toLowerCase());
   if (normalized) return normalized;
   const selected = choice?.choice ?? choice; const selectedAction = action(selected); const mapped = selected?.kind ?? selected?.value ?? selected?.mapped_value;
@@ -98,7 +102,7 @@ export function normalizeEntityKind(value, { choice } = {}) {
   throw new Error('Unknown entity kind requires a reviewed final kind allowed by v4 checks.');
 }
 export function normalizeContext(value, { choice } = {}) {
-  if (missing(value)) return value ?? null;
+  if (absent(value)) return null;
   const normalized = String(value).toLowerCase(); if (CONTEXTS.has(normalized)) return normalized;
   const selected = choice?.choice ?? choice; if (action(selected) !== 'map-context') throw new Error('Unknown context requires a reviewed mapping.');
   const mapped = selected.value ?? selected.mapped_value ?? selected.target;
