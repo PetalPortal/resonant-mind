@@ -5,7 +5,7 @@ import { canonicalJson } from '../lib/canonical-json.mjs';
 // supplied by PostgreSQL. This is deliberately a catalog, not a guessed ORM.
 const PEOPLE_KINDS = new Set(['self', 'person', 'peer_ai']);
 const NODE_KINDS = new Set(['concept', 'project', 'infrastructure', 'artifact', 'moment', 'session_log', 'practice', 'research', 'journal', 'community', 'emotional_pattern', 'relationship', 'self', 'place', 'object']);
-const OBS_CONTEXTS = new Set(['default', 'emotional-processing', 'interests-curiosities', 'creative-space', 'relational-models', 'episodic', 'values-ethics', 'research']);
+export const OBS_CONTEXTS = new Set(['default', 'emotional-processing', 'interests-curiosities', 'creative-space', 'relational-models', 'episodic', 'values-ethics', 'research']);
 const OBS_SOURCES = new Set(['conversation', 'realization', 'external', 'consolidated', 'inferred', 'journal']);
 const OBS_SALIENCE = new Set(['active', 'high', 'background', 'foundational', 'medium', 'heavy']);
 const OBS_WEIGHTS = new Set(['light', 'medium', 'heavy']);

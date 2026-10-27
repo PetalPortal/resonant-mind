@@ -13,9 +13,9 @@
 import { canonicalJson } from './canonical-json.mjs';
 import { canonicalSha256 } from './hash.mjs';
 import { MigrationRefusal } from './refusal.mjs';
-import { extractBundleRows, generateDecisionItems } from '../policy/generate.mjs';
+import { contextVocabulary, extractBundleRows, generateDecisionItems } from '../policy/generate.mjs';
 import { NODE_KINDS, PERSON_KINDS } from '../transform/id-map.mjs';
-import { CONTEXTS, ENUMS, normalizeTimestamp } from '../transform/value-map.mjs';
+import { ENUMS, normalizeTimestamp } from '../transform/value-map.mjs';
 
 export const REVIEW_NOTICE = 'This shows MEMORY CONTENT from the bundle, in the clear. Read it yourself; do not paste it into a chat, a ticket or a log, and do not hand it to an agent. It is not written into the decision file, the reports or any other artifact.';
 const MAX_VALUE = 300;
@@ -172,8 +172,9 @@ export function buildReviewModel({ bundle, decisions }) {
       sections.push(facts(`The value in question (${item.source_table}.${item.field})`, [['the text the source holds', boundedText(observedValue)], ['the shape v4 expects', String(item.expected_shape)]]));
       sections.push(rowFacts(row, 'The row it is in'));
     } else if (item.type === 'unknown-value') {
-      const allowed = ENUMS[item.field] === undefined ? (item.field === 'primary_context' || item.field === 'context' || item.field === 'scope' ? [...CONTEXTS] : undefined) : [...ENUMS[item.field]];
-      sections.push(facts(`The value in question (${item.source_table}.${item.field})`, [['the value the source holds', boundedText(observedValue)], ...(allowed === undefined ? [] : [['values v4 accepts', allowed.join(', ')]])]));
+      const allowed = ENUMS[item.field] === undefined ? (item.field === 'primary_context' || item.field === 'context' || item.field === 'scope' ? [...contextVocabulary(item.source_table, item.field)] : undefined) : [...ENUMS[item.field]];
+      const strayNote = item.source_table === 'observations' && item.field === 'context' ? [['note', "v4's own migration stores any other observation context as default; here the choice is yours"]] : [];
+      sections.push(facts(`The value in question (${item.source_table}.${item.field})`, [['the value the source holds', boundedText(observedValue)], ...(allowed === undefined ? [] : [['values v4 accepts', allowed.join(', ')]]), ...strayNote]));
       sections.push(rowFacts(row, 'The row it is in'));
     } else if (item.type === 'broken-foreign-key') {
       sections.push(facts(`The reference in question (${item.source_table}.${item.field})`, [['points at', `${item.target_table} id ${boundedText(item.target_id)}, which the bundle does not hold`]]));
